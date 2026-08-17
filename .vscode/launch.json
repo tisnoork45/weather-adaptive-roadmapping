@@ -1,0 +1,53 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run: Headless Pipeline (Synthetic Demo)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/run.py",
+            "args": ["--synthetic", "--show", "--max-frames", "300"],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Run: Headless Pipeline (Webcam)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/run.py",
+            "args": ["--source", "0", "--show"],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Run: Dashboard (Streamlit)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "streamlit",
+            "args": ["run", "app.py"],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Download: Models",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/download.py",
+            "args": ["models"],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Train: Weather Classifier",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/models.py",
+            "args": ["--data-dir", "data/weather_dataset", "--epochs", "15"],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Test: Full Suite",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["tests.py", "-v"],
+            "console": "integratedTerminal"
+        }
+    ]
+}

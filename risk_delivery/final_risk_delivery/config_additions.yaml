@@ -1,0 +1,33 @@
+# =============================================================================
+# ADD THESE TWO TOP-LEVEL SECTIONS to your existing config.yaml.
+# Nothing else in your config.yaml needs to change -- these are new,
+# independent sections (same nesting style as the existing `fusion:` section).
+# =============================================================================
+
+velocity:
+  # RelativeVelocityEstimator settings (relative_velocity.py)
+  history_length: 5          # samples kept per track for the velocity estimate
+  max_gap_seconds: 2.0        # if a track's oldest/newest retained sample span
+                                # more than this, the estimate is treated as
+                                # invalid rather than computed across too large
+                                # a real-time gap (relevant given this pipeline's
+                                # variable, sometimes multi-second, CPU latency)
+  ema_alpha: 0.5                # smoothing weight for the velocity estimate
+                                  # (1.0 = no smoothing, raw frame-to-frame diff)
+
+risk:
+  # RiskEngine settings (risk_engine.py)
+  min_safe_distance_m: 5.0    # distance-only floor: a close but non-closing
+                                # object is still flagged, not marked SAFE
+                                # just because it isn't actively approaching
+  ttc_thresholds_s:             # base TTC thresholds, in CLEAR weather
+    CRITICAL: 1.5
+    WARNING: 3.0
+    CAUTION: 5.0
+  weather_multipliers:          # multiplies the thresholds above per weather
+    clear: 1.00                  # (>1.0 = more conservative: same TTC value
+    overcast: 1.05                # escalates to a worse risk level sooner)
+    rain: 1.30
+    fog: 1.60
+    snow: 1.50
+    night: 1.25

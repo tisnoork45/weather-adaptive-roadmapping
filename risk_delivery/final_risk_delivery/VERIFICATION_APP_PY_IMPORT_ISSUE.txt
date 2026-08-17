@@ -1,0 +1,32 @@
+IMPORTANT — check this first, independent of the new risk engine work
+=========================================================================
+
+An earlier patch (the fusion-weight-wiring patch, a few turns back) that
+replaced pipeline.py as a full-file overwrite ACCIDENTALLY DROPPED several
+functions app.py imports and depends on:
+
+  render_header, render_metric_row, render_weather_panel,
+  render_sensor_weights_panel, render_depth_panel, render_bev_panel,
+  render_latency_breakdown, render_object_table
+
+If you applied that patch's pipeline.py as instructed, app.py's import
+statement:
+
+    from pipeline import (
+        PerceptionPipeline, render_bev_panel, render_camera_feed,
+        render_depth_panel, render_header, render_latency_breakdown,
+        render_metric_row, render_object_table, render_sensor_weights_panel,
+        render_weather_panel,
+    )
+
+would now fail with ImportError, and `streamlit run app.py` would crash
+immediately on startup.
+
+CHECK: run `streamlit run app.py` right now, before applying anything else
+in this delivery, and see if it errors. If it does, that confirms this.
+
+FIX: the pipeline.py in this delivery restores every one of those
+functions in full (verified: I directly ran app.py's exact import
+statement against it and confirmed every symbol resolves), in addition to
+containing the new risk-engine wiring. Applying THIS pipeline.py fixes
+both problems in one step.

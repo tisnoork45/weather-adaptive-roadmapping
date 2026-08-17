@@ -1,0 +1,66 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Model weights (large binaries - use download.py instead)
+weights/*.pt
+weights/*.pth
+weights/*.onnx
+!weights/.gitkeep
+
+# Datasets (large - use download.py instead)
+data/nuscenes/*
+data/seeing_through_fog/*
+data/carla/*
+data/weather_dataset/*
+!data/*/.gitkeep
+!data/sample_videos/.gitkeep
+
+# Logs and outputs
+logs/*.log*
+outputs/videos/*.mp4
+outputs/frames/*.jpg
+outputs/frames/*.png
+outputs/bev/*.ply
+!logs/.gitkeep
+!outputs/videos/.gitkeep
+!outputs/frames/.gitkeep
+!outputs/bev/.gitkeep
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Large downloaded datasets
+bdd100k_download/
+dawn_download/
+
+# Large model files
+*.pt
+*.pth
+*.onnx
+
+# Large videos
+*.mp4
+*.avi
+*.mov
+
+depth_anything_v2_repo/

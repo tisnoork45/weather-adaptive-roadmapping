@@ -1,0 +1,52 @@
+# =============================================================================
+# Weather Adaptive Road Mapping for Autonomous Vehicles - Requirements
+# Tested with Python 3.9 - 3.12 on Windows, Linux, and macOS.
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# GPU users: install a CUDA-enabled torch build BEFORE this file, e.g.:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# then run: pip install -r requirements.txt
+# =============================================================================
+
+# --- Core deep learning ------------------------------------------------------
+torch>=2.1.0
+torchvision>=0.16.0
+
+# --- Object detection ---------------------------------------------------------
+ultralytics>=8.3.0          # YOLO11x
+
+# --- Depth estimation -----------------------------------------------------------
+# If this ref becomes unavailable, the pipeline automatically falls back to a
+# classical depth heuristic so the rest of the system still runs.
+#git+https://github.com/DepthAnything/Depth-Anything-V2.git@main#egg=depth_anything_v2
+
+# --- Classical CV / imaging -----------------------------------------------------
+opencv-python>=4.9.0
+Pillow>=10.0.0
+
+# --- Numerical / scientific computing --------------------------------------------
+numpy>=1.24.0,<2.0.0
+scipy>=1.11.0
+pandas>=2.1.0
+
+# --- 3D mapping / point clouds -----------------------------------------------------
+open3d>=0.18.0
+
+# --- Dashboard -----------------------------------------------------------------------
+streamlit>=1.35.0
+
+# --- Config / IO ----------------------------------------------------------------------
+PyYAML>=6.0.1
+requests>=2.31.0
+tqdm>=4.66.0
+
+# --- Dataset devkits (optional, only needed for real dataset ingestion) -----------------
+#nuscenes-devkit>=1.1.11
+
+# --- Testing --------------------------------------------------------------------------
+pytest>=7.4.0
+
+# --- Simulator (optional; install the version matching your CARLA server) ----------------
+# carla==0.9.15

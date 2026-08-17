@@ -1,0 +1,114 @@
+PATCH NOTES — Relative Velocity + TTC + Weather-Adaptive Risk Engine
+==========================================================================
+
+FILES IN THIS DELIVERY:
+  relative_velocity.py    <- NEW FILE
+  ttc_calculator.py       <- NEW FILE
+  risk_engine.py          <- NEW FILE
+  pipeline.py             <- REPLACES existing pipeline.py (also fixes a
+                              real regression from an earlier patch -- see
+                              VERIFICATION_APP_PY_IMPORT_ISSUE.txt)
+  utils.py                <- REPLACES existing utils.py (adds risk HUD
+                              rendering; all prior alpha/distance additions
+                              from the fusion-wiring patch preserved)
+  config_additions.yaml   <- APPEND these two sections to your config.yaml
+                              (do not replace the whole file)
+  test_risk_additions.py  <- APPEND this file's content to the end of your
+                              tests.py (do not replace tests.py; the last
+                              two functions require the `pipeline` fixture
+                              that already exists in your tests.py)
+
+NOT MODIFIED: models.py, tracking.py, mapping.py, fusion.py, download.py,
+carla_sim.py, config.yaml's existing sections (only appended to).
+
+===========================================================================
+APPLICATION ORDER (PowerShell)
+===========================================================================
+
+# 1. Back up first (cheap insurance)
+Copy-Item pipeline.py pipeline.py.bak
+Copy-Item utils.py utils.py.bak
+Copy-Item config.yaml config.yaml.bak
+Copy-Item tests.py tests.py.bak
+
+# 2. Replace the two full files
+Copy-Item <path-to-delivery>\pipeline.py .\pipeline.py -Force
+Copy-Item <path-to-delivery>\utils.py .\utils.py -Force
+
+# 3. Add the three new files
+Copy-Item <path-to-delivery>\relative_velocity.py .\relative_velocity.py
+Copy-Item <path-to-delivery>\ttc_calculator.py .\ttc_calculator.py
+Copy-Item <path-to-delivery>\risk_engine.py .\risk_engine.py
+
+# 4. Append the config sections (open config.yaml in an editor and paste
+#    the contents of config_additions.yaml at the end -- do NOT overwrite
+#    the file, config_additions.yaml only contains the two NEW sections)
+notepad config.yaml
+# (paste the two sections from config_additions.yaml at the end, save)
+
+# 5. Append the new tests (open tests.py, paste test_risk_additions.py's
+#    content at the very end -- the last two test functions there use the
+#    `pipeline` fixture that's already defined earlier in your tests.py)
+notepad tests.py
+# (paste test_risk_additions.py's content at the end, save)
+
+# 6. Apply the run.py diff manually (see RUN_PY_DIFF.txt -- one line added
+#    to an existing draw_hud(...) call)
+notepad run.py
+
+===========================================================================
+TESTS TO RUN AFTER EACH STEP
+===========================================================================
+
+# After step 3 (new files added) -- confirm they import and compile cleanly:
+python -c "import relative_velocity, ttc_calculator, risk_engine; print('OK')"
+
+# After step 4 (config.yaml updated) -- confirm it still parses and has the
+# new sections:
+python -c "from utils import load_config; c = load_config('config.yaml'); print(c.risk.ttc_thresholds_s); print(c.velocity.history_length)"
+
+# After step 2 (pipeline.py/utils.py replaced) -- confirm app.py's imports
+# still resolve (this specifically re-checks the regression found above):
+python -c "from pipeline import PerceptionPipeline, render_bev_panel, render_camera_feed, render_depth_panel, render_header, render_latency_breakdown, render_metric_row, render_object_table, render_sensor_weights_panel, render_weather_panel; print('app.py imports OK')"
+
+# After step 5 (tests appended) -- full suite, should now show MORE passing
+# tests than your last known-good count (20 -> 20 + the new ones):
+pytest tests.py -v
+
+# After step 6 (run.py edited) -- full pipeline smoke test on your real video:
+python run.py --source data/sample_videos/road.mp4 --show --max-frames 30
+
+# Full dashboard check (catches anything a headless test can't):
+streamlit run app.py
+
+===========================================================================
+WHAT WAS VERIFIED BEFORE THIS WAS PACKAGED (in an isolated sandbox, NOT
+against your real data/models -- your real run is still the first real test)
+===========================================================================
+  - relative_velocity.py: exact-math recovery of a known closing velocity
+    (-5.0 m/s) despite variable, non-fixed real-frame timing; large time
+    gaps correctly produce valid=False instead of a bogus number; lost
+    tracks correctly pruned from memory.
+  - ttc_calculator.py: exact math on 5 distinct cases (closing, receding,
+    near-zero closing speed, capped-at-max, near-miss); correctly skips
+    objects with no/invalid velocity.
+  - risk_engine.py: exact TTC-boundary classification; THE core weather-
+    adaptive requirement directly proven -- an IDENTICAL TTC value (2.0s)
+    classifies as WARNING in clear weather and CRITICAL in fog, purely from
+    the weather label changing; the distance-only floor correctly catches
+    a close-but-not-closing (stationary) object that TTC alone would miss;
+    overall risk is correctly the worst object, not an average.
+  - utils.py: draw_hud(risk_level=None) is BYTE-IDENTICAL to omitting the
+    parameter (verified via np.array_equal) -- fully backward compatible;
+    draw_risk_panel(frame, None) is a true no-op; passing real risk data
+    visibly changes rendered output.
+  - pipeline.py: full assembled pipeline (all 8 original stages + the 3 new
+    ones) runs end-to-end without error; risk genuinely escalates
+    SAFE -> CAUTION -> WARNING across 8 simulated frames of an object
+    closing at a constant 8 m/s, using the PIPELINE'S OWN config-loaded
+    risk_engine/velocity_estimator instances (not fresh test objects,
+    catching real wiring/config-key bugs); confirmed app.py's exact import
+    statement resolves against the new pipeline.py (this caught and fixed
+    a real regression from the earlier fusion patch -- see
+    VERIFICATION_APP_PY_IMPORT_ISSUE.txt).
+  - 17 new pytest tests, all passing.

@@ -1,0 +1,30 @@
+Small manual edit for run.py (a diff, not a full-file replacement, since I
+don't have your current copy and don't want to clobber local changes).
+
+Find the draw_hud(...) call in the main loop:
+
+    annotated = draw_hud(
+        annotated, weather=output.weather.label, fps=output.metrics.get("fps", 0.0),
+        object_count=len(output.detections), latency_ms=output.total_latency_ms,
+        weights=output.fusion.sensor_weights,
+    )
+
+Add one argument so the compact top-left HUD also shows overall risk
+(the detailed top-right risk panel is already drawn automatically by
+render_camera_feed(), this just adds a one-line summary alongside FPS/
+weather/objects):
+
+    annotated = draw_hud(
+        annotated, weather=output.weather.label, fps=output.metrics.get("fps", 0.0),
+        object_count=len(output.detections), latency_ms=output.total_latency_ms,
+        weights=output.fusion.sensor_weights,
+        risk_level=output.risk.overall_risk_level if output.risk else None,
+    )
+
+No other change needed in run.py -- render_camera_feed(output) (already
+called earlier in the loop from the fusion patch) automatically picks up
+the new risk panel with zero changes to that call site.
+
+app.py needs NO manual edit -- it already calls render_camera_feed(output)
+and render_metric_row(st, output), both of which now include risk
+automatically (see pipeline.py in this delivery).

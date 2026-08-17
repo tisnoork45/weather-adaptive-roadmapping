@@ -1,0 +1,149 @@
+"""Streamlit real-time dashboard for the Weather Adaptive Road Mapping system.
+
+Run with:
+    streamlit run app.py
+"""
+
+from __future__ import annotations
+
+import time
+
+import cv2
+import streamlit as st
+
+from pipeline import (
+    PerceptionPipeline,
+    render_bev_panel,
+    render_camera_feed,
+    render_depth_panel,
+    render_header,
+    render_latency_breakdown,
+    render_metric_row,
+    render_object_table,
+    render_sensor_weights_panel,
+    render_weather_panel,
+)
+from utils import VideoStream, generate_synthetic_frame, get_logger, load_config
+
+logger = get_logger(__name__)
+
+st.set_page_config(page_title="Weather Adaptive Road Mapping", page_icon="🚗", layout="wide")
+
+
+@st.cache_resource(show_spinner="Loading perception pipeline (models)...")
+def load_pipeline() -> PerceptionPipeline:
+    config = load_config("config.yaml")
+    return PerceptionPipeline(config)
+
+
+def get_frame_source(cfg, use_synthetic: bool):
+    if use_synthetic:
+        counter = {"i": 0}
+
+        def _next_frame():
+            counter["i"] += 1
+            return generate_synthetic_frame(cfg.camera.width, cfg.camera.height, seed=counter["i"])
+
+        return _next_frame, None
+
+    stream = VideoStream(source=cfg.camera.source, width=cfg.camera.width, height=cfg.camera.height)
+    try:
+        stream.open()
+    except IOError:
+        logger.warning("Could not open configured camera source; falling back to synthetic demo.")
+        return get_frame_source(cfg, use_synthetic=True)[0], None
+
+    def _next_frame():
+        ok, frame = stream.read()
+        return frame if ok and frame is not None else None
+
+    return _next_frame, stream
+
+
+def main() -> None:
+    pipeline = load_pipeline()
+    cfg = pipeline.config
+
+    render_header(st, cfg.dashboard.title)
+
+    with st.sidebar:
+        st.header("Controls")
+        run_live = st.toggle("Run live pipeline", value=True)
+        use_synthetic = st.checkbox("Use synthetic demo stream (no camera/dataset required)", value=True)
+        st.markdown("---")
+        st.subheader("Pipeline Stages")
+        st.checkbox("Lane Detection", value=cfg.pipeline.run_lane_detection, disabled=True)
+        st.checkbox("Depth Estimation", value=cfg.pipeline.run_depth_estimation, disabled=True)
+        st.checkbox("Weather Classification", value=cfg.pipeline.run_weather_classification, disabled=True)
+        st.checkbox("Object Tracking", value=cfg.pipeline.run_tracking, disabled=True)
+        st.checkbox("BEV Mapping", value=cfg.pipeline.run_bev_mapping, disabled=True)
+        st.markdown("---")
+        st.caption("Weather Adaptive Road Mapping for Autonomous Vehicles — Capstone Project")
+
+    metric_placeholder = st.empty()
+    col_left, col_right = st.columns([2, 1])
+
+    with col_left:
+        st.subheader("Camera Feed")
+        camera_placeholder = st.empty()
+        st.subheader("Depth Map")
+        depth_placeholder = st.empty()
+
+    with col_right:
+        st.subheader("Bird's-Eye-View Map")
+        bev_placeholder = st.empty()
+        weather_placeholder = st.empty()
+        weights_placeholder = st.empty()
+
+    latency_placeholder = st.empty()
+    table_placeholder = st.empty()
+
+    if not run_live:
+        st.info("Toggle 'Run live pipeline' in the sidebar to start streaming.")
+        return
+
+    next_frame_fn, stream = get_frame_source(cfg, use_synthetic)
+
+    try:
+        frame_budget = 1.0 / max(cfg.pipeline.target_fps, 1)
+        for _ in range(100000):  # effectively unbounded; Streamlit reruns handle looping
+            loop_start = time.perf_counter()
+            frame = next_frame_fn()
+            if frame is None:
+                st.warning("End of video stream reached.")
+                break
+
+            output = pipeline.process(frame)
+
+            with metric_placeholder.container():
+                render_metric_row(st, output)
+
+            annotated = render_camera_feed(output)
+            camera_placeholder.image(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), channels="RGB",
+                                      use_container_width=True)
+
+            depth_placeholder.image(cv2.cvtColor(render_depth_panel(output), cv2.COLOR_BGR2RGB),
+                                     channels="RGB", use_container_width=True)
+
+            bev_placeholder.image(cv2.cvtColor(render_bev_panel(output), cv2.COLOR_BGR2RGB),
+                                   channels="RGB", use_container_width=True)
+
+            with weather_placeholder.container():
+                render_weather_panel(st, output)
+
+            with weights_placeholder.container():
+                render_sensor_weights_panel(st, output)
+            with latency_placeholder.container():
+                render_latency_breakdown(st, output)
+            with table_placeholder.container():
+                render_object_table(st, output)
+
+            elapsed = time.perf_counter() - loop_start
+            time.sleep(max(0.0, frame_budget - elapsed))
+    finally:
+        if stream is not None:
+            stream.release()
+
+
+if __name__ == "__main__":
+    main()
