@@ -90,7 +90,6 @@ def main() -> None:
         use_synthetic = st.checkbox("Use synthetic demo stream (no camera/dataset required)", value=True)
         st.markdown("---")
         st.subheader("Pipeline Stages")
-        st.checkbox("Lane Detection", value=cfg.pipeline.run_lane_detection, disabled=True)
         st.checkbox("Depth Estimation", value=cfg.pipeline.run_depth_estimation, disabled=True)
         st.checkbox("Weather Classification", value=cfg.pipeline.run_weather_classification, disabled=True)
         st.checkbox("Object Tracking", value=cfg.pipeline.run_tracking, disabled=True)

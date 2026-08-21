@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 
 from pipeline import PerceptionPipeline
-from utils import draw_detections, draw_hud, draw_lanes, get_logger, load_config
+from utils import draw_detections, draw_hud, get_logger, load_config
 
 logger = get_logger(__name__)
 
@@ -108,7 +108,6 @@ def main() -> None:
             dets = output.detections
             track_ids = [d.track_id if d.track_id is not None else i for i, d in enumerate(dets.detections)]
             annotated = draw_detections(annotated, dets.boxes(), dets.labels(), dets.scores(), track_ids)
-            annotated = draw_lanes(annotated, output.lanes.lanes)
             annotated = draw_hud(annotated, weather=output.weather.label, fps=output.metrics.get("fps", 0.0),
                                   object_count=len(output.detections), latency_ms=output.total_latency_ms,
                                   weights=output.fusion.sensor_weights)

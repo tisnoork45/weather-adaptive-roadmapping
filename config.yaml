@@ -39,7 +39,6 @@ logging:
   backup_count: 3
 
 pipeline:
-  run_lane_detection: true
   run_depth_estimation: true
   run_weather_classification: true
   run_tracking: true
@@ -59,28 +58,6 @@ detection:
   iou_threshold: 0.45
   input_size: 640
   classes_of_interest: [0, 1, 2, 3, 5, 7, 9, 11]   # person, bicycle, car, motorcycle, bus, truck, traffic light, stop sign
-
-lane_detection:
-  # NOTE: no pretrained checkpoint is downloaded for lane detection. The
-  # official UFLD-v2 checkpoint targets the upstream `parsingNet`
-  # architecture (not the simplified network sketch in models.py) and isn't
-  # hosted at a stable direct-download URL. This project uses a classical
-  # Canny+Hough-transform lane detector with temporal smoothing as its
-  # documented primary method -- see README.md > "Lane Detection: Design Decision".
-  weights_path: "weights/ufld_v2_culane_res18.pth"
-  backbone: "resnet18"
-  input_width: 800
-  input_height: 320
-  num_lanes: 4
-  num_row_anchors: 72
-  num_col_anchors: 81
-  confidence_threshold: 0.4
-  # NEW: previously a hardcoded-only Python default (0.6) never exposed
-  # here; this value matches that default exactly, so wiring it changes
-  # nothing unless you edit it. EMA weight for the new frame's fitted lane
-  # line vs. the previous frame's (lower = smoother/less jittery, slower
-  # to react to real lane changes).
-  smoothing_alpha: 0.6
 
 depth_estimation:
   weights_path: "weights/depth_anything_v2_vits.pth"
@@ -118,20 +95,18 @@ mapping:
 fusion:
   base_weights:
     camera_detection: 0.9
-    camera_lane: 0.85
     camera_depth: 0.8
   weather_modifiers:
-    clear:     {camera_detection: 1.00, camera_lane: 1.00, camera_depth: 1.00}
-    overcast:  {camera_detection: 0.95, camera_lane: 0.95, camera_depth: 0.95}
-    rain:      {camera_detection: 0.75, camera_lane: 0.65, camera_depth: 0.60}
-    fog:       {camera_detection: 0.55, camera_lane: 0.50, camera_depth: 0.45}
-    snow:      {camera_detection: 0.60, camera_lane: 0.45, camera_depth: 0.55}
-    night:     {camera_detection: 0.70, camera_lane: 0.60, camera_depth: 0.65}
+    clear:     {camera_detection: 1.00, camera_depth: 1.00}
+    overcast:  {camera_detection: 0.95, camera_depth: 0.95}
+    rain:      {camera_detection: 0.75, camera_depth: 0.60}
+    fog:       {camera_detection: 0.55, camera_depth: 0.45}
+    snow:      {camera_detection: 0.60, camera_depth: 0.55}
+    night:     {camera_detection: 0.70, camera_depth: 0.65}
   ema_alpha: 0.25
 
 confidence_estimation:
   detection_signal_weights: {model_score: 0.5, weather_penalty: 0.3, box_stability: 0.2}
-  lane_signal_weights: {model_score: 0.5, weather_penalty: 0.35, curve_consistency: 0.15}
   depth_signal_weights: {model_score: 0.4, weather_penalty: 0.4, edge_consistency: 0.2}
   history_length: 30
 velocity:

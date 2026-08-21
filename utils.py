@@ -273,14 +273,6 @@ def color_for_id(identifier: int) -> Tuple[int, int, int]:
     return _PALETTE[identifier % len(_PALETTE)]
 
 
-# NEW: semantic lane colors (BGR), used by draw_lanes only when a caller
-# passes `sides=` -- see draw_lanes docstring for the backward-compatible
-# fallback when it doesn't.
-LEFT_LANE_COLOR: Tuple[int, int, int] = (60, 220, 60)
-RIGHT_LANE_COLOR: Tuple[int, int, int] = (235, 150, 40)
-UNKNOWN_LANE_COLOR: Tuple[int, int, int] = (200, 200, 200)
-
-
 def draw_detections(
     frame: np.ndarray,
     boxes: Sequence[Sequence[float]],
@@ -318,43 +310,6 @@ def draw_detections(
     return frame
 
 
-def draw_lanes(
-    frame: np.ndarray,
-    lanes: Sequence[Sequence[Tuple[int, int]]],
-    sides: Optional[Sequence[str]] = None,
-    alpha: float = 1.0,
-) -> np.ndarray:
-    """UNCHANGED base behavior from the previous fusion-wiring patch, PLUS
-    an optional `sides` parameter (e.g. LaneResult.sides -- a list of
-    "left"/"right" strings, same length/order as `lanes`) for semantically
-    consistent lane coloring.
-
-    Backward compatible by construction: when `sides` is None or its length
-    doesn't match `lanes` (any caller that hasn't been updated), this falls
-    back EXACTLY to the original index-based `color_for_id(idx + 5)`
-    coloring -- byte-identical output to before this parameter existed.
-    """
-    alpha = float(np.clip(alpha, 0.0, 1.0))
-    target = frame if alpha >= 0.999 else frame.copy()
-    use_sides = sides is not None and len(sides) == len(lanes)
-
-    for idx, lane in enumerate(lanes):
-        if len(lane) < 2:
-            continue
-        if use_sides:
-            color = {"left": LEFT_LANE_COLOR, "right": RIGHT_LANE_COLOR}.get(sides[idx], UNKNOWN_LANE_COLOR)
-        else:
-            color = color_for_id(idx + 5)
-        pts = np.array(lane, dtype=np.int32).reshape(-1, 1, 2)
-        cv2.polylines(target, [pts], isClosed=False, color=color, thickness=4)
-        for pt in lane:
-            cv2.circle(target, (int(pt[0]), int(pt[1])), 3, color, -1)
-
-    if alpha < 0.999:
-        cv2.addWeighted(target, alpha, frame, 1 - alpha, 0, frame)
-    return frame
-
-
 def overlay_depth_map(frame: np.ndarray, depth_map: np.ndarray, alpha: float = 0.45) -> np.ndarray:
     depth_norm = cv2.normalize(depth_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     depth_color = cv2.applyColorMap(depth_norm, cv2.COLORMAP_MAGMA)
@@ -374,7 +329,7 @@ def draw_hud(frame: np.ndarray, weather: str, fps: float, object_count: int,
     NEW: optional `risk_level` parameter (default None -- omitting it
     produces byte-identical output to before this parameter existed, same
     backward-compatibility pattern as the earlier `alpha`/`distances`
-    additions to draw_detections/draw_lanes).
+    additions to draw_detections).
     """
     extra_line = 1 if risk_level is not None else 0
     panel_h = 34 + 22 * (2 + len(weights) + extra_line)

@@ -1,8 +1,8 @@
 """End-to-end weather-adaptive perception pipeline + dashboard render helpers.
 
 `PerceptionPipeline` orchestrates, per frame: weather classification, object
-detection, tracking, lane detection, depth estimation, dynamic confidence
-estimation, adaptive fusion, and BEV mapping. The dashboard-rendering
+detection, tracking, depth estimation, dynamic confidence estimation,
+adaptive fusion, and BEV mapping. The dashboard-rendering
 functions at the bottom of this file are thin, Streamlit-only helpers used
 by app.py; they are kept in the same file as the pipeline (rather than a
 separate `dashboard` package) since together they are still small.
@@ -21,14 +21,14 @@ import cv2
 from fusion import AdaptiveFusionEngine, ConfidenceEstimator, FusionResult, ModuleConfidence
 from mapping import BEVMapper, BEVResult
 from models import (
-    DepthEstimator, DepthResult, DetectionResult, LaneDetector, LaneResult,
+    DepthEstimator, DepthResult, DetectionResult,
     WeatherClassifier, WeatherResult, YOLODetector,
 )
 from relative_velocity import RelativeVelocity, RelativeVelocityEstimator
 from risk_engine import RiskAssessment, RiskEngine
 from tracking import ByteTracker
 from ttc_calculator import compute_ttc_for_objects
-from utils import ConfigDict, MetricsTracker, RISK_LEVEL_COLORS, draw_detections, draw_lanes, get_logger
+from utils import ConfigDict, MetricsTracker, RISK_LEVEL_COLORS, draw_detections, get_logger
 
 logger = get_logger(__name__)
 
@@ -40,7 +40,6 @@ class PipelineOutput:
     frame: np.ndarray
     weather: WeatherResult
     detections: DetectionResult
-    lanes: LaneResult
     depth: DepthResult
     fusion: FusionResult
     bev: Optional[BEVResult]
@@ -75,32 +74,6 @@ class PerceptionPipeline:
             device_preference=device_pref,
         )
 
-        self.lane_detector = LaneDetector(
-            weights_path=config.lane_detection.weights_path,
-            backbone=config.lane_detection.backbone,
-            input_width=config.lane_detection.input_width,
-            input_height=config.lane_detection.input_height,
-            num_lanes=config.lane_detection.num_lanes,
-            num_row_anchors=config.lane_detection.num_row_anchors,
-            num_col_anchors=config.lane_detection.num_col_anchors,
-            confidence_threshold=config.lane_detection.confidence_threshold,
-            device_preference=device_pref,
-            # NEW: wires the previously-unused smoothing_alpha config value,
-            # plus real camera geometry (already present in config.yaml for
-            # other purposes) so the lane ROI can be derived from the
-            # actual configured camera pitch instead of a fixed fraction.
-            smoothing_alpha=config.lane_detection.smoothing_alpha,
-            fy=config.camera.intrinsics.fy,
-            cy=config.camera.intrinsics.cy,
-            pitch_deg=config.camera.pitch_deg,
-            # NEW: config.camera.intrinsics.{fy,cy} are calibrated against a
-            # frame config.camera.height pixels tall -- LaneDetector needs
-            # this reference height to correctly rescale them when the
-            # actual input frame is a different resolution (e.g. road.mp4
-            # is 576px tall vs. this config's assumed 720px).
-            reference_height=config.camera.height,
-        )
-
         self.depth_estimator = DepthEstimator(
             weights_path=config.depth_estimation.weights_path,
             encoder=config.depth_estimation.encoder,
@@ -128,7 +101,6 @@ class PerceptionPipeline:
 
         self.confidence_estimator = ConfidenceEstimator(
             detection_signal_weights=config.confidence_estimation.detection_signal_weights,
-            lane_signal_weights=config.confidence_estimation.lane_signal_weights,
             depth_signal_weights=config.confidence_estimation.depth_signal_weights,
             history_length=config.confidence_estimation.history_length,
         )
@@ -163,7 +135,7 @@ class PerceptionPipeline:
         self.pipeline_cfg = config.pipeline
         self.max_depth_m = config.depth_estimation.max_depth_m
         self.metrics = MetricsTracker(
-            stages=["weather", "detection", "tracking", "lane", "depth", "fusion", "bev", "risk"]
+            stages=["weather", "detection", "tracking", "depth", "fusion", "bev", "risk"]
         )
         self._frame_index = 0
         logger.info("All perception pipeline modules initialized successfully.")
@@ -203,9 +175,6 @@ class PerceptionPipeline:
             detection_result.detections = self.tracker.update(detection_result.detections)
         self.metrics.record_stage("tracking", (time.perf_counter() - tracked_start) * 1000.0)
 
-        lane_result = self.lane_detector.infer(frame) if self.pipeline_cfg.run_lane_detection else LaneResult()
-        self.metrics.record_stage("lane", lane_result.inference_time_ms)
-
         if self.pipeline_cfg.run_depth_estimation:
             depth_result = self.depth_estimator.infer(frame)
         else:
@@ -213,14 +182,14 @@ class PerceptionPipeline:
         self.metrics.record_stage("depth", depth_result.inference_time_ms)
 
         fusion_start = time.perf_counter()
-        module_confidences = self._estimate_confidences(weather_result, detection_result, lane_result, depth_result)
+        module_confidences = self._estimate_confidences(weather_result, detection_result, depth_result)
         fusion_result = self.fusion_engine.fuse(weather_result.label, module_confidences)
         self.metrics.record_stage("fusion", (time.perf_counter() - fusion_start) * 1000.0)
 
         bev_result = None
         if self.pipeline_cfg.run_bev_mapping:
             bev_result = self.bev_mapper.build_bev(
-                frame, depth_result.depth_map, detection_result.detections, lanes_pixel=lane_result.lanes,
+                frame, depth_result.depth_map, detection_result.detections,
             )
             self.metrics.record_stage("bev", bev_result.inference_time_ms)
 
@@ -244,26 +213,19 @@ class PerceptionPipeline:
         self.metrics.record_frame(object_count=len(detection_result))
 
         return PipelineOutput(
-            frame=frame, weather=weather_result, detections=detection_result, lanes=lane_result,
+            frame=frame, weather=weather_result, detections=detection_result,
             depth=depth_result, fusion=fusion_result, bev=bev_result,
             relative_velocities=relative_velocities, risk=risk_result,
             metrics=self.metrics.summary(), total_latency_ms=total_latency_ms,
         )
 
     def _estimate_confidences(self, weather_result: WeatherResult, detection_result: DetectionResult,
-                               lane_result: LaneResult, depth_result: DepthResult) -> List[ModuleConfidence]:
+                               depth_result: DepthResult) -> List[ModuleConfidence]:
         mean_det_score = float(np.mean(detection_result.scores())) if len(detection_result) else 0.0
         detection_conf = self.confidence_estimator.estimate_detection_confidence(
             mean_detection_score=mean_det_score,
             weather_modifier=self.fusion_engine.get_weather_modifier(weather_result.label, "camera_detection"),
             num_detections=len(detection_result),
-        )
-
-        mean_lane_score = float(np.mean(lane_result.confidences)) if lane_result.confidences else 0.0
-        lane_conf = self.confidence_estimator.estimate_lane_confidence(
-            mean_lane_score=mean_lane_score,
-            weather_modifier=self.fusion_engine.get_weather_modifier(weather_result.label, "camera_lane"),
-            num_lanes=len(lane_result),
         )
 
         depth_std = float(np.std(depth_result.depth_map)) if depth_result.depth_map.size else 0.0
@@ -273,7 +235,7 @@ class PerceptionPipeline:
             max_depth_m=self.max_depth_m,
         )
 
-        return [detection_conf, lane_conf, depth_conf]
+        return [detection_conf, depth_conf]
 
 
 # =============================================================================
@@ -540,7 +502,7 @@ def _draw_primary_object_panel(frame: np.ndarray, output: PipelineOutput) -> np.
 
 def _draw_ego_speed_panel(frame: np.ndarray) -> np.ndarray:
     """Small (~150x64px), bottom-left corner only -- deliberately far from
-    the road center / lane lines / primary object panel. The backend has no
+    the road center / primary object panel. The backend has no
     odometry/speed sensor anywhere (no such field exists on PipelineOutput,
     config.yaml, or any perception module -- relative_velocity.py's own
     docstring states this project has no odometry/IMU input), so this
@@ -561,11 +523,11 @@ def _draw_ego_speed_panel(frame: np.ndarray) -> np.ndarray:
 
 
 def render_camera_feed(output: PipelineOutput) -> np.ndarray:
-    """The dominant dashboard element. Reuses utils.draw_detections /
-    draw_lanes (their alpha/distances params already existed, just weren't
-    wired to a caller before now) plus two small HUD overlays for the
-    primary-risk-object card and the ego-speed indicator. Draws NOTHING
-    that isn't already present on PipelineOutput.
+    """The dominant dashboard element. Reuses utils.draw_detections (its
+    alpha/distances params already existed, just weren't wired to a caller
+    before now) plus two small HUD overlays for the primary-risk-object card
+    and the ego-speed indicator. Draws NOTHING that isn't already present on
+    PipelineOutput.
     """
     annotated = output.frame.copy()
     dets = output.detections
@@ -582,18 +544,16 @@ def render_camera_feed(output: PipelineOutput) -> np.ndarray:
                 bev_distance_by_track[obj.track_id] = obj.z_m
     distances = [bev_distance_by_track.get(d.track_id) for d in dets.detections]
 
-    # Detection/lane opacity driven by the ACTUAL current adaptive sensor
+    # Detection opacity driven by the ACTUAL current adaptive sensor
     # weights -- makes the project's core weather-adaptive-fusion thesis
     # visible directly on the camera feed (lower trust in fog/rain/night ->
     # visibly fainter overlays), using an already-computed backend value.
     detection_alpha = output.fusion.sensor_weights.get("camera_detection", 1.0)
-    lane_alpha = output.fusion.sensor_weights.get("camera_lane", 1.0)
 
     annotated = draw_detections(
         annotated, dets.boxes(), dets.labels(), dets.scores(), track_ids,
         distances=distances, alpha=detection_alpha,
     )
-    annotated = draw_lanes(annotated, output.lanes.lanes, alpha=lane_alpha)
     annotated = _draw_primary_object_panel(annotated, output)
     annotated = _draw_ego_speed_panel(annotated)
     return annotated
@@ -617,7 +577,7 @@ def render_weather_card_html(output: PipelineOutput) -> str:
 
 def render_sensor_status_html(output: PipelineOutput, pipeline_cfg) -> str:
     """Rule 13: per-module confidence where a real one exists
-    (fusion.module_confidences, for detection/lane/depth), ACTIVE/INACTIVE
+    (fusion.module_confidences, for detection/depth), ACTIVE/INACTIVE
     (from the real config.pipeline flags) where it doesn't (tracking, BEV --
     neither produces a scalar confidence anywhere in the backend)."""
     conf = output.fusion.module_confidences
@@ -633,7 +593,6 @@ def render_sensor_status_html(output: PipelineOutput, pipeline_cfg) -> str:
 
     rows = (
         _row("Camera Detection", conf.get("camera_detection"), True)
-        + _row("Lane Detection", conf.get("camera_lane"), pipeline_cfg.run_lane_detection)
         + _row("Depth Estimation", conf.get("camera_depth"), pipeline_cfg.run_depth_estimation)
         + _row("Object Tracking", None, pipeline_cfg.run_tracking)
         + _row("BEV Mapping", None, pipeline_cfg.run_bev_mapping)
@@ -684,7 +643,7 @@ def render_risk_guide_html(output: PipelineOutput, risk_engine: Optional[RiskEng
 def render_sensor_weights_html(output: PipelineOutput) -> str:
     """Rule 18: actual output.fusion.sensor_weights, no invented values."""
     weights = output.fusion.sensor_weights
-    label_map = {"camera_detection": "Detection", "camera_lane": "Lane", "camera_depth": "Depth"}
+    label_map = {"camera_detection": "Detection", "camera_depth": "Depth"}
     bars = "".join(
         _progress_bar_html(label_map.get(k, k), v, f"{v:.2f}") for k, v in weights.items()
     ) or '<div style="color:#7a8896;font-size:0.72rem;">No fusion data yet.</div>'
@@ -715,7 +674,7 @@ def render_latency_html(output: PipelineOutput) -> str:
     list during the TTC/risk backend integration, but the original chart
     here hardcoded a stage list from before that existed, so it never
     surfaced) alongside the pre-existing stages."""
-    stages = ["weather", "detection", "tracking", "lane", "depth", "fusion", "bev", "risk"]
+    stages = ["weather", "detection", "tracking", "depth", "fusion", "bev", "risk"]
     rows = "".join(
         f'<div class="diag-row"><span>{s.capitalize()}</span><span>{output.metrics[f"{s}_latency_ms"]:.1f} ms</span></div>'
         for s in stages if f"{s}_latency_ms" in output.metrics

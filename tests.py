@@ -16,10 +16,10 @@ import numpy as np
 import pytest
 
 from fusion import AdaptiveFusionEngine, ConfidenceEstimator, ModuleConfidence
-from models import Detection, DetectionResult, LaneDetector, LaneResult, YOLODetector
+from models import Detection, DetectionResult, YOLODetector
 from pipeline import PerceptionPipeline, PipelineOutput
 from tracking import ByteTracker, cxcyah_to_xyxy, iou_batch, xyxy_to_cxcyah
-from utils import LEFT_LANE_COLOR, RIGHT_LANE_COLOR, draw_lanes, generate_synthetic_frame, load_config
+from utils import generate_synthetic_frame, load_config
 
 # =============================================================================
 # Detection tests
@@ -183,7 +183,7 @@ def pipeline() -> PerceptionPipeline:
 
 
 def test_pipeline_initializes(pipeline: PerceptionPipeline) -> None:
-    assert pipeline.detector and pipeline.lane_detector and pipeline.depth_estimator
+    assert pipeline.detector and pipeline.depth_estimator
     assert pipeline.weather_classifier and pipeline.tracker and pipeline.fusion_engine and pipeline.bev_mapper
 
 
@@ -200,7 +200,7 @@ def test_pipeline_process_returns_valid_output(pipeline: PerceptionPipeline) -> 
         assert len(det.box) == 4
     assert output.depth.depth_map.shape[:2] == frame.shape[:2]
     assert 0.0 <= output.fusion.overall_scene_confidence <= 1.0
-    assert set(output.fusion.sensor_weights.keys()) == {"camera_detection", "camera_lane", "camera_depth"}
+    assert set(output.fusion.sensor_weights.keys()) == {"camera_detection", "camera_depth"}
     if output.bev is not None:
         assert output.bev.bev_image.ndim == 3
 
@@ -535,215 +535,3 @@ def test_end_to_end_ttc_risk_escalation_with_pipeline_config(pipeline: Perceptio
     order = {"SAFE": 0, "CAUTION": 1, "WARNING": 2, "CRITICAL": 3}
     assert order[fog_level] >= order[clear_level]
     assert fog_level != clear_level
-
-
-# =============================================================================
-# Lane detector improvements (models.py::LaneDetector)
-#
-# These are deliberately split into two groups:
-#   1. Pure geometry tests against _lanes_are_geometrically_plausible()
-#      directly, using hand-built point lists -- fully deterministic, no
-#      dependency on real Canny/Hough behavior on a given image.
-#   2. infer()-level smoke tests against real synthetic frames (including
-#      utils.generate_synthetic_frame(), which already draws two converging
-#      white lines forming a schematic "road" -- a convenient, already-
-#      existing deterministic input for exercising the full classical-CV
-#      stack: ROI, color preference, Hough, geometry check, smoothing).
-# These tests describe the detector as a "more robust classical lane-
-# boundary detector" -- NOT as proof that any detected line is an actual
-# painted lane marking (no such ground truth exists in this project).
-# =============================================================================
-
-
-def _synthetic_fitted_line(x_top: float, x_bottom: float, height: int = 480, n: int = 10):
-    """Builds a point list with the exact shape/sample-row convention
-    LaneDetector._fit_lane_line_smoothed() produces (n points, y from
-    0.55*height to height-1), for pure geometry-function testing without
-    needing a real image or Hough transform."""
-    y_samples = np.linspace(int(height * 0.55), height - 1, n)
-    y0, y1 = y_samples[0], y_samples[-1]
-    return [(int(x_top + (x_bottom - x_top) * (y - y0) / (y1 - y0)), int(y)) for y in y_samples]
-
-
-def test_lane_geometry_plausible_pair_accepted() -> None:
-    detector = LaneDetector(device_preference="cpu")
-    left = _synthetic_fitted_line(x_top=300, x_bottom=220)
-    right = _synthetic_fitted_line(x_top=340, x_bottom=460)
-    assert detector._lanes_are_geometrically_plausible(left, right, w=640) is True
-
-
-def test_lane_geometry_crossing_pair_rejected() -> None:
-    detector = LaneDetector(device_preference="cpu")
-    left = _synthetic_fitted_line(x_top=300, x_bottom=460)   # ends up right of "right" at bottom
-    right = _synthetic_fitted_line(x_top=340, x_bottom=220)  # crosses
-    assert detector._lanes_are_geometrically_plausible(left, right, w=640) is False
-
-
-def test_lane_geometry_too_narrow_pair_rejected() -> None:
-    detector = LaneDetector(device_preference="cpu")
-    left = _synthetic_fitted_line(x_top=310, x_bottom=300)
-    right = _synthetic_fitted_line(x_top=330, x_bottom=320)  # 20px apart at bottom of a 640-wide frame
-    assert detector._lanes_are_geometrically_plausible(left, right, w=640) is False
-
-
-def test_lane_geometry_too_wide_pair_rejected() -> None:
-    detector = LaneDetector(device_preference="cpu")
-    left = _synthetic_fitted_line(x_top=310, x_bottom=10)
-    right = _synthetic_fitted_line(x_top=330, x_bottom=630)  # ~97% of frame width apart at bottom
-    assert detector._lanes_are_geometrically_plausible(left, right, w=640) is False
-
-
-def test_lane_geometry_check_only_applies_to_a_real_pair() -> None:
-    """The plausibility check only ever runs when _cv_fallback finds a
-    candidate on BOTH sides (see the `if "left" in candidates and "right"
-    in candidates:` guard) -- a single detected line is never passed
-    through this function at all and is therefore never rejected by it.
-    Directly on the function, a degenerate "pair" that isn't really a
-    left/right pair (e.g. two identical lines, zero separation) is
-    correctly rejected by the crossing/zero-separation check -- that is
-    the function behaving correctly, not a bug to work around here."""
-    detector = LaneDetector(device_preference="cpu")
-    left = _synthetic_fitted_line(x_top=300, x_bottom=220)
-    assert detector._lanes_are_geometrically_plausible(left, left, w=640) is False
-
-    # The documented no-op bypass: mismatched sample counts or too few
-    # points to compare meaningfully -- returns True (does not block).
-    too_short = [(300, 264), (280, 300)]
-    assert detector._lanes_are_geometrically_plausible(too_short[:1], left, w=640) is True
-
-
-def test_lane_roi_horizon_is_scale_invariant_across_resolutions() -> None:
-    """Regression test for the resolution-mismatch bug found via the real
-    road.mp4 test (1024x576 actual vs. config.yaml's assumed 1280x720):
-    fy/cy are pixel values calibrated against `reference_height` (720), so
-    _compute_roi must rescale them by (actual_h / reference_height) before
-    computing the horizon row -- otherwise the ROI's vertical position,
-    as a FRACTION of frame height, drifts with resolution instead of
-    representing the same real-world horizon direction. Does NOT
-    initialize any perception model -- LaneDetector's classical CV path
-    never loads one, so constructing it here is lightweight.
-    """
-    detector = LaneDetector(device_preference="cpu", fy=1000.0, cy=360.0,
-                             pitch_deg=2.0, reference_height=720.0)
-
-    roi_reference = detector._compute_roi(w=1280, h=720)   # matches reference_height exactly
-    roi_actual = detector._compute_roi(w=1024, h=576)       # road.mp4's real resolution (0.8x scale)
-
-    top_y_reference = int(roi_reference[0][1][1])
-    top_y_actual = int(roi_actual[0][1][1])
-
-    frac_reference = top_y_reference / 720.0
-    frac_actual = top_y_actual / 576.0
-
-    assert abs(frac_reference - frac_actual) < 0.02  # within 2 percentage points of frame height
-
-
-def test_lane_slope_filter_rejects_horizontal_admits_shallow_lane_segment() -> None:
-    """Regression test for the road.mp4 diagnostic finding that the
-    original hardcoded slope threshold (0.3) rejected a genuine, distant
-    lane-dash segment (foreshortened by perspective near the ROI's
-    horizon edge) alongside actually-horizontal dashboard/hood noise --
-    both looked "near flat" to a 0.3 threshold. Uses the ACTUAL segment
-    coordinates measured from a single real road.mp4 frame during that
-    diagnostic (not fabricated, not re-read from the video here -- this
-    test only does arithmetic on hardcoded numbers, no video/CV pipeline
-    involved), and tests the real `self.slope_threshold` attribute
-    directly, not a reimplementation of the filter logic.
-    """
-    detector = LaneDetector(device_preference="cpu")
-
-    # (304,443)-(578,448): a long, extremely shallow segment, almost
-    # certainly the vehicle dashboard/hood's horizontal edge. Must remain
-    # rejected.
-    horizontal_slope = (448 - 443) / (578 - 304)
-    assert abs(horizontal_slope) < detector.slope_threshold
-
-    # (465,313)-(521,318): the short, genuine lane-dash segment near the
-    # ROI's top (far from the camera, hence shallow apparent slope from
-    # perspective foreshortening). Must now survive the filter.
-    lane_slope = (318 - 313) / (521 - 465)
-    assert abs(lane_slope) >= detector.slope_threshold
-
-    # The old 0.3 threshold would have rejected BOTH -- confirms this test
-    # actually distinguishes the fix, not just coincidentally passing.
-    assert abs(horizontal_slope) < 0.3
-    assert abs(lane_slope) < 0.3
-
-
-def test_lane_detector_no_edges_no_crash() -> None:
-    detector = LaneDetector(device_preference="cpu")
-    blank = np.full((480, 640, 3), 60, dtype=np.uint8)  # flat gray, no edges at all
-    result = detector.infer(blank)
-    assert isinstance(result, LaneResult)
-    assert result.lanes == [] and result.confidences == [] and result.sides == []
-
-
-def test_lane_detector_output_shapes_stay_aligned() -> None:
-    """lanes/confidences/sides must always be the same length, in the same
-    order -- this is the contract every downstream consumer (draw_lanes,
-    mapping.py's BEV lane loop, the object table) relies on."""
-    detector = LaneDetector(device_preference="cpu")
-    frame = generate_synthetic_frame(width=640, height=480, seed=3)
-    result = detector.infer(frame)
-    assert len(result.lanes) == len(result.confidences) == len(result.sides)
-    for side in result.sides:
-        assert side in ("left", "right")
-
-
-def test_lane_detector_smoothing_populates_history_across_frames() -> None:
-    detector = LaneDetector(device_preference="cpu", smoothing_alpha=0.5)
-    frame = generate_synthetic_frame(width=1280, height=720, seed=1)
-    detector.infer(frame)
-    detector.infer(frame)  # same frame again -- exercises the EMA-blend-with-previous branch
-    assert detector._prev_coeffs.get("left") is not None or detector._prev_coeffs.get("right") is not None
-
-
-def test_lane_detector_missing_lane_does_not_crash(monkeypatch) -> None:
-    """Force HoughLinesP to find nothing (simulates a frame with no
-    detectable edges at all, e.g. heavy motion blur) and confirm infer()
-    degrades to an empty, well-formed LaneResult instead of crashing."""
-    detector = LaneDetector(device_preference="cpu")
-    monkeypatch.setattr(cv2, "HoughLinesP", lambda *a, **k: None)
-    frame = generate_synthetic_frame(width=640, height=480, seed=2)
-    result = detector.infer(frame)
-    assert isinstance(result, LaneResult)
-    assert result.lanes == [] and result.sides == []
-
-
-def test_draw_lanes_uses_semantic_colors_when_sides_given() -> None:
-    frame = np.zeros((100, 200, 3), dtype=np.uint8)
-    lanes = [[(50, 10), (50, 90)], [(150, 10), (150, 90)]]
-    out = draw_lanes(frame.copy(), lanes, sides=["left", "right"])
-    assert tuple(int(c) for c in out[50, 50]) == LEFT_LANE_COLOR
-    assert tuple(int(c) for c in out[50, 150]) == RIGHT_LANE_COLOR
-
-
-def test_draw_lanes_backward_compatible_without_sides() -> None:
-    """Byte-identical to the pre-`sides`-parameter behavior when the
-    caller doesn't pass it (e.g. any not-yet-updated call site)."""
-    frame = np.zeros((100, 200, 3), dtype=np.uint8)
-    lanes = [[(50, 10), (50, 90)]]
-    out_omitted = draw_lanes(frame.copy(), lanes)
-    out_explicit_none = draw_lanes(frame.copy(), lanes, sides=None)
-    assert np.array_equal(out_omitted, out_explicit_none)
-
-
-def test_draw_lanes_falls_back_when_sides_length_mismatches() -> None:
-    frame = np.zeros((100, 200, 3), dtype=np.uint8)
-    lanes = [[(50, 10), (50, 90)]]
-    out_mismatched = draw_lanes(frame.copy(), lanes, sides=["left", "right"])  # length 2 vs 1 lane
-    out_no_sides = draw_lanes(frame.copy(), lanes)
-    assert np.array_equal(out_mismatched, out_no_sides)
-
-
-def test_pipeline_lane_result_has_side_identity(pipeline: PerceptionPipeline) -> None:
-    """Uses the existing module-scoped `pipeline` fixture -- no new heavy
-    pipeline construction. Confirms the PipelineOutput.lanes contract
-    (lanes/confidences/sides length-matched) holds end-to-end through the
-    real PerceptionPipeline, not just the LaneDetector in isolation."""
-    frame = generate_synthetic_frame(640, 480, seed=42)
-    output = pipeline.process(frame)
-    assert len(output.lanes.lanes) == len(output.lanes.sides) == len(output.lanes.confidences)
-    for side in output.lanes.sides:
-        assert side in ("left", "right")
-

@@ -16,7 +16,7 @@ import cv2
 
 from pipeline import PerceptionPipeline
 from utils import (
-    VideoStream, draw_detections, draw_hud, draw_lanes, generate_synthetic_frame,
+    VideoStream, draw_detections, draw_hud, generate_synthetic_frame,
     get_logger, load_config, overlay_depth_map,
 )
 
@@ -114,10 +114,6 @@ def main() -> None:
             dets = output.detections
             track_ids = [d.track_id if d.track_id is not None else i for i, d in enumerate(dets.detections)]
             annotated = draw_detections(annotated, dets.boxes(), dets.labels(), dets.scores(), track_ids)
-            # NEW: pass side identity so left/right get consistent colors
-            # instead of the previous list-index-based coloring (where a
-            # single detected line was always yellow regardless of side).
-            annotated = draw_lanes(annotated, output.lanes.lanes, sides=output.lanes.sides)
 
             if args.overlay_depth:
                 annotated = overlay_depth_map(annotated, output.depth.depth_map)

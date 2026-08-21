@@ -1,6 +1,6 @@
 # Weather Adaptive Road Mapping for Autonomous Vehicles
 
-A weather-adaptive multi-sensor perception system for autonomous vehicles, in pure Python. Combines object detection, lane detection, monocular depth estimation, weather classification, dynamic confidence estimation, adaptive sensor fusion, multi-object tracking, and bird's-eye-view (BEV) mapping into one real-time pipeline with a live Streamlit dashboard.
+A weather-adaptive multi-sensor perception system for autonomous vehicles, in pure Python. Combines object detection, monocular depth estimation, weather classification, dynamic confidence estimation, adaptive sensor fusion, multi-object tracking, relative-velocity/time-to-collision risk assessment, and bird's-eye-view (BEV) mapping into one real-time pipeline with a live Streamlit dashboard.
 
 > **Final Year Engineering Capstone Project** — no ROS, no Docker, runs entirely inside VS Code.
 
@@ -24,7 +24,7 @@ weather-adaptive-road-mapping/
 ├── carla_sim.py           # CARLA simulator bridge (spawn vehicle, cycle weather presets)
 │
 ├── utils.py                # Config loading, logging, metrics, visualization, video IO, device selection
-├── models.py                # YOLO11x detector, UFLD-v2 lane detector, Depth Anything V2, EfficientNet weather classifier + trainer
+├── models.py                # YOLO11x detector, Depth Anything V2, EfficientNet weather classifier + trainer
 ├── tracking.py               # Self-contained ByteTrack (Kalman filter + two-stage Hungarian matching)
 ├── fusion.py                  # Dynamic confidence estimation + weather-adaptive sensor fusion
 ├── mapping.py                  # Open3D point cloud + bird's-eye-view rasterization
@@ -43,7 +43,7 @@ weather-adaptive-road-mapping/
 | File | Responsibility |
 |---|---|
 | `utils.py` | Cross-cutting infrastructure: config, logging, metrics, drawing, video IO, device selection |
-| `models.py` | All four perception *models* (detection, lane, depth, weather) — each with a real network + graceful fallback |
+| `models.py` | All three perception *models* (detection, depth, weather) — each with a real network + graceful fallback |
 | `tracking.py` | The tracking *algorithm* — kept separate because ByteTrack is a self-contained, non-trivial component |
 | `fusion.py` | The *adaptive* logic that makes this project "weather-adaptive" — confidence scoring + dynamic weighting |
 | `mapping.py` | The *spatial* output — BEV point cloud + top-down map |
@@ -57,21 +57,25 @@ weather-adaptive-road-mapping/
 Camera / Video / CARLA
         │  BGR frame
         ▼
-┌───────────────────────────────────────────┐
-│           PerceptionPipeline.process()      │
-│                                              │
-│  1. WeatherClassifier   → weather + probs    │
-│  2. YOLODetector        → object boxes        │
-│  3. ByteTracker         → track IDs             │
-│  4. LaneDetector        → lane polylines         │
-│  5. DepthEstimator      → dense depth map          │
-│  6. ConfidenceEstimator → per-module confidence      │
-│  7. AdaptiveFusionEngine→ dynamic sensor weights       │
-│  8. BEVMapper           → point cloud + top-down map     │
-└───────────────────────────────┬────────────────────────┘
+┌────────────────────────────────────────────────────┐
+│              PerceptionPipeline.process()            │
+│                                                        │
+│  1. WeatherClassifier        → weather + probs          │
+│  2. YOLODetector             → object boxes               │
+│  3. ByteTracker              → track IDs                    │
+│  4. DepthEstimator           → dense depth map                 │
+│  5. ConfidenceEstimator      → per-module confidence              │
+│  6. AdaptiveFusionEngine     → dynamic sensor weights                │
+│  7. BEVMapper                → point cloud + top-down map               │
+│  8. RelativeVelocityEstimator→ per-track closing/lateral velocity          │
+│  9. compute_ttc_for_objects  → time-to-collision per object                   │
+│ 10. RiskEngine                → weather-adjusted risk level                      │
+└───────────────────────────────┬──────────────────────────────────────────────┘
                                  ▼
               app.py (Streamlit dashboard) / run.py (OpenCV)
 ```
+
+**Lane detection was removed from this project.** An earlier revision included a classical Canny+Hough-transform lane detector (`LaneDetector` in `models.py`); it has been fully removed from the backend, the BEV projection, both UIs, and the config/test surface. It is not part of the current architecture.
 
 Every model wrapper in `models.py` follows the same pattern: try to load the real pretrained checkpoint; if unavailable (no internet, weights not yet downloaded, license not yet accepted), fall back to a deterministic classical-CV / heuristic implementation, so **the whole pipeline always runs end-to-end**, which is essential for demoing the adaptive-fusion logic without every large checkpoint being present.
 
@@ -89,24 +93,13 @@ Being precise about this matters for a capstone report. Here is the honest state
 | **Object Tracking** (ByteTrack) | ✅ Genuine, correctly implemented algorithm | ByteTrack is a Kalman-filter + Hungarian-matching *algorithm*, not a neural network — it was never meant to have separate pretrained weights. Fully functional as shipped, no training required. |
 | **Adaptive Sensor Fusion / Confidence Estimation** | ✅ Genuine, by design rule-based | This is the project's engineered "adaptive" logic layer (weather-conditioned weighting + EMA smoothing) — intentionally hand-tuned/heuristic, not a trained model. This is the correct way to build it, not a shortcut. |
 | **BEV Mapping** (Open3D) | ✅ Genuine geometric computation | Deterministic pinhole back-projection, not ML. |
-| **Lane Detection** | ⚠️ Classical CV **by design**, not a fallback for a broken model | See "Lane Detection: Design Decision" below — this is an intentional, documented engineering choice, not something left broken. |
+| **Relative Velocity / TTC / Risk** | ✅ Genuine geometric + rule-based computation | Finite-difference velocity from BEV track history → time-to-collision → weather-multiplied risk thresholds (`relative_velocity.py`, `ttc_calculator.py`, `risk_engine.py`). |
 
 ### A note on the previous broken weather-classifier download
 An earlier version of `download.py` downloaded a checkpoint from a *different* EfficientNet-B0 implementation (lukemelas/EfficientNet-PyTorch, key names like `_conv_stem`, `_fc`) into this project's *torchvision*-based model (key names like `features.0`, `classifier.1`). Since **zero** keys overlapped between the two naming conventions, `load_state_dict(strict=False)` silently loaded nothing — the "pretrained" classifier was actually running on random initialization while appearing to load successfully. This has been fixed: `download.py` no longer downloads a generic checkpoint at all (torchvision's own correctly-matched ImageNet weights are fetched automatically inside training instead), and `WeatherClassifier` now refuses to load any checkpoint that isn't in this project's own verified format, falling back to the heuristic classifier instead of silently running on garbage weights.
 
-### Lane Detection: Design Decision
-`models.py` originally attempted to download a UFLD-v2 checkpoint into a custom `UFLDv2Net` class. Two separate problems made this non-functional:
-1. **The download URL was wrong.** No stable, scriptable direct-download URL for the official UFLD-v2 checkpoints exists — the official repo (`cfzd/Ultra-Fast-Lane-Detection-v2`) distributes trained models via project-specific channels, not GitHub Releases.
-2. **Even a correct checkpoint wouldn't have loaded.** The official architecture is called `parsingNet` and has a materially different structure (hybrid row+column anchor classification, auxiliary segmentation head) from the simplified `UFLDv2Net` sketch in this codebase. The official checkpoint's `state_dict` keys would not match this network's, regardless of the URL.
-
-Rather than either (a) silently loading a mismatched checkpoint and pretending it works, or (b) taking on the scope of vendoring the full official UFLD-v2 repository (with its own config system, auxiliary training losses, and Google-Drive-hosted weights) into a CPU-only, dependency-light capstone project, this project makes a **documented, deliberate choice**: lane detection uses a classical Canny-edge + Hough-transform pipeline with frame-to-frame EMA smoothing of the fitted line coefficients (see `LaneDetector._cv_fallback` / `_fit_lane_line_smoothed` in `models.py`).
-
-This is defensible to present in a capstone report as an intentional engineering tradeoff, not a broken feature:
-- Fully deterministic and explainable (a reviewer can verify *why* a given line was drawn).
-- Requires zero training data and zero GPU — genuinely real-time on a CPU-only laptop.
-- The temporal smoothing (`smoothing_alpha` in `config.yaml`) measurably reduces jitter compared to a naive per-frame-only Hough fit, which is worth demonstrating/reporting (e.g. plot lane x-position variance with smoothing on vs. off).
-
-If you want to extend this later (explicitly **out of scope** for the current submission), the honest path is to vendor the official `cfzd/Ultra-Fast-Lane-Detection-v2` repository's `parsingNet` class directly and use their training/inference scripts as-is, rather than re-implementing the architecture from a paper description.
+### Lane Detection has been removed
+An earlier revision of this project included a classical Canny-edge + Hough-transform lane detector (`LaneDetector` in `models.py`), plus a never-loaded architectural sketch (`UFLDv2Net`) for a future learned lane model. Both have been fully removed: there is no lane detector, no lane overlay, no lane confidence signal, and no lane-related configuration anywhere in the current pipeline, BEV projection, dashboards, or test suite. If lane detection is reintroduced in the future, it should be designed fresh rather than restored from history.
 
 ---
 
@@ -210,10 +203,9 @@ python download.py models --only yolo depth
 |---|---|---|
 | YOLO11x | `weights/yolo11x.pt` | Auto-downloaded via `ultralytics` |
 | Depth Anything V2 (ViT-S) | `weights/depth_anything_v2_vits.pth` | HuggingFace |
-| Lane detection | *(none — classical CV by design)* | See "Lane Detection: Design Decision" above |
 | Weather classification | *(none — train your own, see below)* | See walkthrough below |
 
-`python download.py models --only lane weather` now prints an explanation instead of attempting a broken download (see "Model Status" above for why).
+`python download.py models --only weather` prints an explanation instead of attempting a broken download (see "Model Status" above for why). `download.py` also still accepts a legacy `lane` target for backward compatibility with old scripts/muscle memory — it is a no-op that only prints an explanatory message; there is no lane detector left in the project for it to download weights for.
 
 ### Training the Weather Classifier (real walkthrough)
 
@@ -314,7 +306,7 @@ Press **`q`** to quit the OpenCV window.
 
 ## Dashboard Contents
 
-Camera feed with boxes/track IDs/lanes • detected-objects table • weather probability chart • depth colormap • per-module dynamic confidence • live adaptive sensor-weight chart • FPS • object count • bird's-eye-view map • per-module latency chart.
+Camera feed with boxes/track IDs • detected-objects table (with distance/TTC/risk) • weather probability chart • depth colormap • per-module dynamic confidence • live adaptive sensor-weight chart • risk-level guide • FPS • object count • bird's-eye-view map • per-module latency chart.
 
 ---
 
@@ -327,7 +319,6 @@ fusion:
   weather_modifiers:
     fog:
       camera_detection: 0.55   # lower = trust detection less in fog
-      camera_lane: 0.50
       camera_depth: 0.45
 ```
 
@@ -344,23 +335,22 @@ Runs entirely on CPU with synthetic frames: detector interface contracts, confid
 
 Work through these in order; each builds on the previous one.
 
-1. **Baseline regression check.** `pytest tests.py -v` → should still show 20/20 passing after any changes (the fallback/synthetic-frame paths are unaffected by the weather-classifier and lane-detection fixes).
+1. **Baseline regression check.** `pytest tests.py -v` → should still show every test passing after any changes (the fallback/synthetic-frame paths are unaffected by the weather-classifier fixes).
 2. **Confirm weight files present.** `weights/yolo11x.pt` and `weights/depth_anything_v2_vits.pth` should exist; `weights/efficientnet_weather.pth` should exist **only after** you've run the training walkthrough above (its absence is expected and fine — the heuristic fallback handles it).
-3. **`download.py models --only lane weather`** should print the two explanatory "Skipping" messages, not attempt (and fail) an HTTP download.
-4. **Train + evaluate the weather classifier** per the walkthrough above; note the printed overall accuracy and per-class confusion matrix for your report.
-5. **Run on `road.mp4` headless, with output saved:**
+3. **Train + evaluate the weather classifier** per the walkthrough above; note the printed overall accuracy and per-class confusion matrix for your report.
+4. **Run on `road.mp4` headless, with output saved:**
    ```bash
    python run.py --source road.mp4 --show --output outputs/videos/road_annotated.mp4
    ```
    Manually verify frame-by-frame:
    - Detection boxes track real vehicles/pedestrians in the footage (you already confirmed 4-5 objects detect correctly).
    - Weather label displayed matches what you can see in the footage (if `road.mp4` is all one condition, at minimum confirm it doesn't flicker wildly between unrelated classes).
-   - Lane lines are reasonably aligned with the visible road markings and don't jump erratically frame-to-frame (the new EMA smoothing should visibly help here vs. the pre-fix version).
    - Depth colormap is spatially sensible (nearer objects/road should look visually distinct from the horizon).
    - BEV panel places detected objects at roughly plausible relative positions.
-6. **Run the Streamlit dashboard against `road.mp4`:** set `camera.source: "road.mp4"` in `config.yaml` (or point the dashboard's video source), uncheck "Use synthetic demo stream", and confirm the adaptive sensor-weight bar chart, FPS, and latency panels update live and stay CPU-reasonable.
-7. **Contrast test (optional but strengthens your report):** if you can find or record a second short clip in a visibly different condition (rain/fog/dusk), run it through the same pipeline and confirm the "Adaptive Sensor Weights" chart visibly shifts lower for `camera_lane`/`camera_depth` compared to the clear clip — this is the actual thesis claim of the project and worth screenshotting for both conditions side-by-side.
-8. **Document limitations explicitly in your report:** relative (not metric) depth, classical (not learned) lane detection with the rationale above, and the weather classifier's per-class accuracy including the naturally-small fog class — see "Model Status" above for the full honest breakdown.
+   - Distance/TTC/risk in the detected-objects table and HUD update sensibly as tracked objects move.
+5. **Run the Streamlit dashboard against `road.mp4`:** set `camera.source: "road.mp4"` in `config.yaml` (or point the dashboard's video source), uncheck "Use synthetic demo stream", and confirm the adaptive sensor-weight bar chart, FPS, and latency panels update live and stay CPU-reasonable.
+6. **Contrast test (optional but strengthens your report):** if you can find or record a second short clip in a visibly different condition (rain/fog/dusk), run it through the same pipeline and confirm the "Adaptive Sensor Weights" chart visibly shifts lower for `camera_depth` compared to the clear clip, and that the risk-level guide's TTC thresholds visibly tighten — this is the actual thesis claim of the project and worth screenshotting for both conditions side-by-side.
+7. **Document limitations explicitly in your report:** relative (not metric) depth, and the weather classifier's per-class accuracy including the naturally-small fog class — see "Model Status" above for the full honest breakdown.
 
 ---
 
@@ -389,4 +379,4 @@ Work through these in order; each builds on the previous one.
 
 ## License
 
-Provided for academic/capstone educational purposes. Third-party pretrained models (YOLO11x, Depth Anything V2, UFLD-v2, EfficientNet) and datasets (nuScenes, Seeing Through Fog, CARLA) remain subject to their own respective licenses.
+Provided for academic/capstone educational purposes. Third-party pretrained models (YOLO11x, Depth Anything V2, EfficientNet) and datasets (nuScenes, Seeing Through Fog, CARLA) remain subject to their own respective licenses.

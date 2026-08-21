@@ -3,7 +3,7 @@
 Uses the estimated monocular depth map plus pinhole camera intrinsics to
 back-project pixels into a 3D point cloud (built with Open3D, if available),
 then flattens that point cloud onto a 2D top-down grid image. Detected /
-tracked objects and lane lines are projected onto the same BEV grid.
+tracked objects are projected onto the same BEV grid.
 """
 
 from __future__ import annotations
@@ -138,8 +138,7 @@ class BEVMapper:
             bev_objects.append(BEVObject(det.track_id, det.class_name, x_m, z_m, det.confidence))
         return bev_objects
 
-    def render_bev_image(self, points: np.ndarray, bev_objects: List[BEVObject],
-                          lane_points_bev: Optional[List[List[Tuple[float, float]]]] = None) -> np.ndarray:
+    def render_bev_image(self, points: np.ndarray, bev_objects: List[BEVObject]) -> np.ndarray:
         canvas = np.full((self.bev_h, self.bev_w, 3), 15, dtype=np.uint8)
 
         for range_m in range(0, int(self.bev_range_m) + 1, 10):
@@ -155,17 +154,6 @@ class BEVMapper:
             valid = (px >= 0) & (px < self.bev_w) & (py >= 0) & (py < self.bev_h)
             canvas[py[valid], px[valid]] = (90, 90, 90)
 
-        if lane_points_bev:
-            for lane in lane_points_bev:
-                pts = []
-                for x_m, z_m in lane:
-                    px = int(self.bev_w / 2 + x_m * self.resolution)
-                    py = int(self.bev_h - 1 - z_m * self.resolution)
-                    if 0 <= px < self.bev_w and 0 <= py < self.bev_h:
-                        pts.append((px, py))
-                if len(pts) >= 2:
-                    cv2.polylines(canvas, [np.array(pts, dtype=np.int32)], False, (0, 200, 255), 2)
-
         for obj in bev_objects:
             px = int(self.bev_w / 2 + obj.x_m * self.resolution)
             py = int(self.bev_h - 1 - obj.z_m * self.resolution)
@@ -180,30 +168,13 @@ class BEVMapper:
         cv2.rectangle(canvas, (ego_x - 8, ego_y - 14), (ego_x + 8, ego_y), (0, 255, 0), -1)
         return canvas
 
-    def build_bev(self, frame: np.ndarray, depth_map: np.ndarray, detections: List[Detection],
-                   lanes_pixel: Optional[List[List[Tuple[int, int]]]] = None) -> BEVResult:
+    def build_bev(self, frame: np.ndarray, depth_map: np.ndarray, detections: List[Detection]) -> BEVResult:
         start = time.perf_counter()
         points, colors = self.build_point_cloud(frame, depth_map, stride=10)
         pcd = self.to_open3d_point_cloud(points, colors)
         bev_objects = self.project_objects_to_bev(detections, depth_map)
 
-        lane_points_bev = None
-        if lanes_pixel:
-            h, w = depth_map.shape[:2]
-            lane_points_bev = []
-            for lane in lanes_pixel:
-                bev_lane = []
-                for (u, v) in lane:
-                    u_c, v_c = int(np.clip(u, 0, w - 1)), int(np.clip(v, 0, h - 1))
-                    depth_val = float(depth_map[v_c, u_c])
-                    if depth_val <= 0.1:
-                        continue
-                    x_m, _, z_m = self.pixel_to_ground_point(u_c, v_c, depth_val)
-                    bev_lane.append((x_m, z_m))
-                if bev_lane:
-                    lane_points_bev.append(bev_lane)
-
-        bev_image = self.render_bev_image(points, bev_objects, lane_points_bev)
+        bev_image = self.render_bev_image(points, bev_objects)
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         return BEVResult(bev_image=bev_image, objects=bev_objects, point_cloud=pcd, inference_time_ms=elapsed_ms)
 
