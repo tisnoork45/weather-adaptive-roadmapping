@@ -324,7 +324,14 @@ def depth_to_colormap(depth_map: np.ndarray) -> np.ndarray:
 
 def draw_hud(frame: np.ndarray, weather: str, fps: float, object_count: int,
              latency_ms: float, weights: Dict[str, float], risk_level: Optional[str] = None) -> np.ndarray:
-    """Draw the corner HUD panel.
+    """Draw the corner HUD panel: Weather / FPS+Latency / Objects / Road Status only.
+
+    `weights` (output.fusion.sensor_weights) is accepted but intentionally
+    NOT rendered here anymore -- per-module confidence (Detection/Depth) now
+    lives exclusively in the bottom-left SENSOR STATUS panel
+    (draw_sensor_status_panel), so this panel doesn't duplicate it. The
+    parameter is kept (rather than removed) so existing callers (run.py,
+    carla_sim.py) don't need their call sites changed.
 
     NEW: optional `risk_level` parameter (default None -- omitting it
     produces byte-identical output to before this parameter existed, same
@@ -332,7 +339,7 @@ def draw_hud(frame: np.ndarray, weather: str, fps: float, object_count: int,
     additions to draw_detections).
     """
     extra_line = 1 if risk_level is not None else 0
-    panel_h = 34 + 22 * (2 + len(weights) + extra_line)
+    panel_h = 34 + 22 * (2 + extra_line)
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, 0), (300, panel_h), (20, 20, 20), -1)
     frame = cv2.addWeighted(overlay, 0.55, frame, 0.45, 0)
@@ -348,13 +355,9 @@ def draw_hud(frame: np.ndarray, weather: str, fps: float, object_count: int,
     y += 22
     if risk_level is not None:
         risk_color = RISK_LEVEL_COLORS.get(risk_level, (200, 200, 200))
-        cv2.putText(frame, f"RISK: {risk_level}", (10, y),
+        cv2.circle(frame, (14, y - 6), 5, risk_color, -1)
+        cv2.putText(frame, f"ROAD STATUS: {risk_level}", (26, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, risk_color, 2, cv2.LINE_AA)
-        y += 22
-    for name, weight in weights.items():
-        cv2.putText(frame, f"{name}: {weight:.2f}", (10, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200, 200, 255), 1, cv2.LINE_AA)
-        y += 20
     return frame
 
 
@@ -391,5 +394,141 @@ def draw_risk_panel(frame: np.ndarray, risk, max_objects: int = 5) -> np.ndarray
         line = f"ID{obj.track_id} {obj.class_name}: {obj.distance_m:.1f}m TTC={ttc_txt}"
         cv2.putText(frame, line, (x0 + 10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1, cv2.LINE_AA)
         y += 20
+
+    return frame
+
+
+def draw_sensor_status_panel(
+    frame: np.ndarray,
+    module_confidences: Dict[str, float],
+    tracking_active: bool,
+    bev_active: bool,
+    overall_scene_confidence: Optional[float] = None,
+) -> np.ndarray:
+    """Bottom-left panel for run.py's OpenCV window: real per-module
+    confidence bars for the modules that actually produce a scalar
+    confidence (camera_detection, camera_depth -- read from
+    output.fusion.module_confidences), ACTIVE/INACTIVE tags for the modules
+    that don't (tracking, BEV), and a fixed "NOT CONNECTED" row each for
+    LiDAR/Radar/IMU. Mirrors pipeline.py's render_sensor_status_html() (the
+    Streamlit equivalent), drawn directly onto the frame instead of as HTML.
+
+    Lane detection was fully removed (see models.py) and is never listed
+    here; this function has no lane-related parameter, row, or label.
+
+    LiDAR/Radar/IMU are NOT integrated into this project -- there is no
+    driver, no sensor input, no processing code, and no config flag for any
+    of them anywhere in the pipeline. Their rows are purely a UI disclosure
+    of optional/future sensor availability, always hardcoded to
+    "NOT CONNECTED": never wired to a real signal, never allowed to read as
+    ACTIVE, and no fake data is generated for them. If real hardware is
+    integrated later, this is the row to wire up to a genuine status flag --
+    until then it must stay exactly as-is.
+    """
+    panel_w = 250
+    row_h = 22
+    num_rows = 7  # Detection bar, Depth bar, Tracking tag, BEV Map tag, LiDAR/Radar/IMU (not connected)
+    footer_h = 20 if overall_scene_confidence is not None else 0
+    panel_h = 34 + num_rows * row_h + footer_h
+
+    h, w = frame.shape[:2]
+    x0, y0 = 10, h - panel_h - 10
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x0, y0), (x0 + panel_w, y0 + panel_h), (18, 22, 26), -1)
+    frame = cv2.addWeighted(overlay, 0.68, frame, 0.32, 0)
+    cv2.rectangle(frame, (x0, y0), (x0 + panel_w, y0 + panel_h), (0, 180, 200), 1)
+
+    cv2.putText(frame, "SENSOR STATUS", (x0 + 10, y0 + 22),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 240), 1, cv2.LINE_AA)
+
+    bar_x0, bar_x1 = x0 + 92, x0 + panel_w - 44
+    y = y0 + 34
+
+    for label, key in (("Detection", "camera_detection"), ("Depth", "camera_depth")):
+        value = module_confidences.get(key)
+        cv2.putText(frame, label, (x0 + 10, y + 14), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.42, (200, 200, 200), 1, cv2.LINE_AA)
+        cv2.rectangle(frame, (bar_x0, y + 5), (bar_x1, y + 13), (60, 60, 60), -1)
+        if value is not None:
+            fill_x1 = bar_x0 + int((bar_x1 - bar_x0) * float(np.clip(value, 0.0, 1.0)))
+            cv2.rectangle(frame, (bar_x0, y + 5), (fill_x1, y + 13), (0, 220, 240), -1)
+            txt = f"{value * 100:.0f}%"
+        else:
+            txt = "N/A"
+        cv2.putText(frame, txt, (bar_x1 + 6, y + 14), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4, (230, 230, 230), 1, cv2.LINE_AA)
+        y += row_h
+
+    for label, active in (("Tracking", tracking_active), ("BEV Map", bev_active)):
+        cv2.putText(frame, label, (x0 + 10, y + 14), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.42, (200, 200, 200), 1, cv2.LINE_AA)
+        tag = "ACTIVE" if active else "INACTIVE"
+        color = (0, 220, 240) if active else (110, 110, 110)
+        (tw, _), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+        cv2.putText(frame, tag, (x0 + panel_w - tw - 10, y + 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1, cv2.LINE_AA)
+        y += row_h
+
+    # LiDAR/Radar/IMU: not integrated into this project (no driver, no
+    # input, no processing code) -- always "NOT CONNECTED", never ACTIVE,
+    # never fed a fabricated value. Purely a UI disclosure of
+    # optional/future sensor availability.
+    for label in ("LiDAR", "Radar", "IMU"):
+        cv2.putText(frame, label, (x0 + 10, y + 14), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.42, (200, 200, 200), 1, cv2.LINE_AA)
+        tag = "NOT CONNECTED"
+        (tw, _), _ = cv2.getTextSize(tag, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+        cv2.putText(frame, tag, (x0 + panel_w - tw - 10, y + 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (110, 110, 110), 1, cv2.LINE_AA)
+        y += row_h
+
+    if overall_scene_confidence is not None:
+        cv2.putText(frame, f"Scene confidence: {overall_scene_confidence * 100:.0f}%",
+                    (x0 + 10, y + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (150, 150, 150), 1, cv2.LINE_AA)
+
+    return frame
+
+
+def draw_risk_level_guide(frame: np.ndarray, thresholds: Dict[str, float]) -> np.ndarray:
+    """Bottom-right static legend explaining the SAFE/CAUTION/WARNING/
+    CRITICAL color coding. `thresholds` must be the REAL, already
+    weather-adjusted TTC thresholds this frame was actually classified
+    against -- pass `risk_engine.get_weather_adjusted_thresholds(weather_label)`,
+    never hardcode threshold numbers here. Mirrors pipeline.py's
+    render_risk_guide_html() (the Streamlit equivalent of this panel).
+    """
+    critical, warning, caution = thresholds.get("CRITICAL"), thresholds.get("WARNING"), thresholds.get("CAUTION")
+
+    def _fmt(v: Optional[float]) -> str:
+        return f"{v:.1f}s" if v is not None else "N/A"
+
+    rows = [
+        ("CRITICAL", RISK_LEVEL_COLORS["CRITICAL"], f"TTC < {_fmt(critical)}"),
+        ("WARNING", RISK_LEVEL_COLORS["WARNING"], f"{_fmt(critical)} - {_fmt(warning)}"),
+        ("CAUTION", RISK_LEVEL_COLORS["CAUTION"], f"{_fmt(warning)} - {_fmt(caution)}"),
+        ("SAFE", RISK_LEVEL_COLORS["SAFE"], f"TTC >= {_fmt(caution)}"),
+    ]
+
+    panel_w, row_h = 230, 22
+    panel_h = 34 + row_h * len(rows)
+    h, w = frame.shape[:2]
+    x0, y0 = w - panel_w - 10, h - panel_h - 10
+
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x0, y0), (x0 + panel_w, y0 + panel_h), (18, 22, 26), -1)
+    frame = cv2.addWeighted(overlay, 0.68, frame, 0.32, 0)
+    cv2.rectangle(frame, (x0, y0), (x0 + panel_w, y0 + panel_h), (0, 180, 200), 1)
+
+    cv2.putText(frame, "RISK LEVEL GUIDE", (x0 + 10, y0 + 22),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 240), 1, cv2.LINE_AA)
+
+    y = y0 + 34
+    for level, color, desc in rows:
+        cv2.circle(frame, (x0 + 16, y + 6), 5, color, -1)
+        cv2.putText(frame, level, (x0 + 30, y + 12), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4, color, 1, cv2.LINE_AA)
+        cv2.putText(frame, desc, (x0 + 118, y + 12), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.38, (210, 210, 210), 1, cv2.LINE_AA)
+        y += row_h
 
     return frame

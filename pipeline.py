@@ -2,10 +2,13 @@
 
 `PerceptionPipeline` orchestrates, per frame: weather classification, object
 detection, tracking, depth estimation, dynamic confidence estimation,
-adaptive fusion, and BEV mapping. The dashboard-rendering
-functions at the bottom of this file are thin, Streamlit-only helpers used
-by app.py; they are kept in the same file as the pipeline (rather than a
-separate `dashboard` package) since together they are still small.
+adaptive fusion, and BEV mapping. The dashboard-rendering functions at the
+bottom of this file are thin UI helpers used by app.py (Streamlit); two of
+them -- `draw_primary_object_panel` and `draw_ego_speed_panel` -- are plain
+cv2 pixel-drawing functions (not HTML) and are also reused by run.py's
+OpenCV window, so both UIs share one implementation instead of duplicating
+it. They are kept in the same file as the pipeline (rather than a separate
+`dashboard` package) since together they are still small.
 """
 
 from __future__ import annotations
@@ -429,16 +432,22 @@ def _select_primary_object(output: PipelineOutput):
     return obj_risk, det_conf, velocity
 
 
-def _draw_primary_object_panel(frame: np.ndarray, output: PipelineOutput) -> np.ndarray:
+def draw_primary_object_panel(frame: np.ndarray, output: PipelineOutput) -> np.ndarray:
     """Compact translucent HUD card for the highest-risk tracked object
     (Rule 11): class/ID/confidence, distance, relative speed, TTC, status.
     All values read straight from output.risk / output.relative_velocities /
     output.detections -- nothing computed here. Distinguishes three honest
     states: risk unavailable (BEV disabled), risk available but zero
-    objects, and a real featured object.
+    objects, and a real featured object. Public (no leading underscore):
+    shared by both app.py's camera feed and run.py's OpenCV window.
     """
     h, w = frame.shape[:2]
-    panel_w = 270
+    # 340px (widened from 270px): at the "Relative Speed" row's font sizes,
+    # the label ("Relative Speed", ~98px) plus its longest real value
+    # ("+123.4 km/h (Approaching)", ~205px) needs ~327px including margins
+    # -- 270px let the value text overlap the label on that row. Measured
+    # directly against cv2.getTextSize, not guessed.
+    panel_w = 340
     x0, y0 = w - panel_w - 14, 14
 
     if output.risk is None:
@@ -500,17 +509,25 @@ def _draw_primary_object_panel(frame: np.ndarray, output: PipelineOutput) -> np.
     return frame
 
 
-def _draw_ego_speed_panel(frame: np.ndarray) -> np.ndarray:
-    """Small (~150x64px), bottom-left corner only -- deliberately far from
-    the road center / primary object panel. The backend has no
-    odometry/speed sensor anywhere (no such field exists on PipelineOutput,
-    config.yaml, or any perception module -- relative_velocity.py's own
-    docstring states this project has no odometry/IMU input), so this
-    always reads N/A. Never fabricates a vehicle speed.
+def draw_ego_speed_panel(frame: np.ndarray, center_x: bool = False) -> np.ndarray:
+    """Small (~150x64px) panel -- deliberately far from the road center /
+    primary object panel. The backend has no odometry/speed sensor anywhere
+    (no such field exists on PipelineOutput, config.yaml, or any perception
+    module -- relative_velocity.py's own docstring states this project has
+    no odometry/IMU input), so this always reads N/A. Never fabricates a
+    vehicle speed.
+
+    `center_x`: if False (default), bottom-left corner -- byte-identical to
+    this function's original, pre-rename position (app.py's camera feed
+    keeps this default, so the Streamlit dashboard's layout is unchanged).
+    If True, horizontally centered along the bottom edge instead -- used by
+    run.py's OpenCV window, which places a separate sensor-status panel in
+    the bottom-left corner and would otherwise overlap it.
     """
     h, w = frame.shape[:2]
     panel_w, panel_h = 150, 64
-    x0, y0 = 14, h - panel_h - 14
+    x0 = (w - panel_w) // 2 if center_x else 14
+    y0 = h - panel_h - 14
     overlay = frame.copy()
     cv2.rectangle(overlay, (x0, y0), (x0 + panel_w, y0 + panel_h), (18, 22, 26), -1)
     frame = cv2.addWeighted(overlay, 0.65, frame, 0.35, 0)
@@ -554,8 +571,8 @@ def render_camera_feed(output: PipelineOutput) -> np.ndarray:
         annotated, dets.boxes(), dets.labels(), dets.scores(), track_ids,
         distances=distances, alpha=detection_alpha,
     )
-    annotated = _draw_primary_object_panel(annotated, output)
-    annotated = _draw_ego_speed_panel(annotated)
+    annotated = draw_primary_object_panel(annotated, output)
+    annotated = draw_ego_speed_panel(annotated)
     return annotated
 
 

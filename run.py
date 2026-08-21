@@ -14,10 +14,10 @@ from pathlib import Path
 
 import cv2
 
-from pipeline import PerceptionPipeline
+from pipeline import PerceptionPipeline, draw_ego_speed_panel, draw_primary_object_panel
 from utils import (
-    VideoStream, draw_detections, draw_hud, generate_synthetic_frame,
-    get_logger, load_config, overlay_depth_map,
+    VideoStream, draw_detections, draw_hud, draw_risk_level_guide, draw_sensor_status_panel,
+    generate_synthetic_frame, get_logger, load_config, overlay_depth_map,
 )
 
 logger = get_logger(__name__)
@@ -118,11 +118,28 @@ def main() -> None:
             if args.overlay_depth:
                 annotated = overlay_depth_map(annotated, output.depth.depth_map)
 
+            # HUD layer, drawn last so it always sits on top of the frame /
+            # depth overlay / bounding boxes. Panels are anchored to the four
+            # corners plus bottom-center so the road/objects in the center of
+            # the frame stay unobstructed. Every value below comes straight
+            # from the real PipelineOutput / RiskEngine -- nothing here
+            # computes or invents a number, matching the same rule the
+            # Streamlit dashboard's render_* helpers already follow.
+            risk_level = output.risk.overall_risk_level if output.risk is not None else None
             annotated = draw_hud(
                 annotated, weather=output.weather.label, fps=output.metrics.get("fps", 0.0),
                 object_count=len(output.detections), latency_ms=output.total_latency_ms,
-                weights=output.fusion.sensor_weights,
+                weights=output.fusion.sensor_weights, risk_level=risk_level,
             )
+            annotated = draw_sensor_status_panel(
+                annotated, module_confidences=output.fusion.module_confidences,
+                tracking_active=cfg.pipeline.run_tracking, bev_active=cfg.pipeline.run_bev_mapping,
+                overall_scene_confidence=output.fusion.overall_scene_confidence,
+            )
+            annotated = draw_primary_object_panel(annotated, output)
+            annotated = draw_ego_speed_panel(annotated, center_x=True)
+            thresholds = pipeline.risk_engine.get_weather_adjusted_thresholds(output.weather.label)
+            annotated = draw_risk_level_guide(annotated, thresholds)
 
             if args.output:
                 if writer is None:

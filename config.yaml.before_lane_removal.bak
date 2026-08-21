@@ -1,0 +1,162 @@
+# =============================================================================
+# Weather Adaptive Road Mapping - Single Merged Configuration
+# =============================================================================
+
+project:
+  name: "Weather Adaptive Road Mapping for Autonomous Vehicles"
+  version: "1.0.0"
+
+paths:
+  weights_dir: "weights"
+  data_dir: "data"
+  logs_dir: "logs"
+  outputs_dir: "outputs"
+
+device:
+  preference: "auto"    # "cuda", "mps", "cpu", or "auto"
+
+camera:
+  source: 0              # 0 = webcam, or path to video file, or RTSP url
+  width: 1280
+  height: 720
+  fps: 30
+  intrinsics:
+    fx: 1000.0
+    fy: 1000.0
+    cx: 640.0
+    cy: 360.0
+  mount_height_m: 1.55
+  pitch_deg: 2.0
+  extrinsics:
+    translation: {x: 1.5, y: 0.0, z: 1.55}
+    rotation: {roll: 0.0, pitch: 2.0, yaw: 0.0}
+
+logging:
+  level: "INFO"
+  log_to_file: true
+  log_file: "logs/pipeline.log"
+  max_bytes: 5242880
+  backup_count: 3
+
+pipeline:
+  run_lane_detection: true
+  run_depth_estimation: true
+  run_weather_classification: true
+  run_tracking: true
+  run_bev_mapping: true
+  target_fps: 15
+
+dashboard:
+  title: "Weather Adaptive Road Mapping Dashboard"
+  refresh_interval_sec: 0.03
+
+# --- Model configuration ------------------------------------------------------
+
+detection:
+  weights_path: "weights/yolo11x.pt"
+  download_url: "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11x.pt"
+  confidence_threshold: 0.35
+  iou_threshold: 0.45
+  input_size: 640
+  classes_of_interest: [0, 1, 2, 3, 5, 7, 9, 11]   # person, bicycle, car, motorcycle, bus, truck, traffic light, stop sign
+
+lane_detection:
+  # NOTE: no pretrained checkpoint is downloaded for lane detection. The
+  # official UFLD-v2 checkpoint targets the upstream `parsingNet`
+  # architecture (not the simplified network sketch in models.py) and isn't
+  # hosted at a stable direct-download URL. This project uses a classical
+  # Canny+Hough-transform lane detector with temporal smoothing as its
+  # documented primary method -- see README.md > "Lane Detection: Design Decision".
+  weights_path: "weights/ufld_v2_culane_res18.pth"
+  backbone: "resnet18"
+  input_width: 800
+  input_height: 320
+  num_lanes: 4
+  num_row_anchors: 72
+  num_col_anchors: 81
+  confidence_threshold: 0.4
+  # NEW: previously a hardcoded-only Python default (0.6) never exposed
+  # here; this value matches that default exactly, so wiring it changes
+  # nothing unless you edit it. EMA weight for the new frame's fitted lane
+  # line vs. the previous frame's (lower = smoother/less jittery, slower
+  # to react to real lane changes).
+  smoothing_alpha: 0.6
+
+depth_estimation:
+  weights_path: "weights/depth_anything_v2_vits.pth"
+  download_url: "https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_vits.pth"
+  encoder: "vits"
+  input_size: 518
+  max_depth_m: 80.0
+
+weather_classification:
+  # NOTE: no generic checkpoint is downloaded here. Train a real one with:
+  #   python prepare_weather_dataset.py ...
+  #   python models.py --data-dir data/weather_dataset --epochs 15
+  # torchvision's own ImageNet-B0 weights are fetched automatically (and
+  # correctly, with matching key names) inside train_weather_model().
+  weights_path: "weights/efficientnet_weather.pth"
+  input_size: 224
+  classes: ["clear", "rain", "fog", "snow", "night", "overcast"]
+  normalize_mean: [0.485, 0.456, 0.406]
+  normalize_std: [0.229, 0.224, 0.225]
+
+tracking:
+  track_thresh: 0.5
+  track_buffer: 30
+  match_thresh: 0.8
+  frame_rate: 30
+  min_box_area: 10
+
+mapping:
+  bev_range_m: 60.0
+  bev_width_m: 40.0
+  bev_resolution_px_per_m: 10
+
+# --- Adaptive fusion configuration ---------------------------------------------
+
+fusion:
+  base_weights:
+    camera_detection: 0.9
+    camera_lane: 0.85
+    camera_depth: 0.8
+  weather_modifiers:
+    clear:     {camera_detection: 1.00, camera_lane: 1.00, camera_depth: 1.00}
+    overcast:  {camera_detection: 0.95, camera_lane: 0.95, camera_depth: 0.95}
+    rain:      {camera_detection: 0.75, camera_lane: 0.65, camera_depth: 0.60}
+    fog:       {camera_detection: 0.55, camera_lane: 0.50, camera_depth: 0.45}
+    snow:      {camera_detection: 0.60, camera_lane: 0.45, camera_depth: 0.55}
+    night:     {camera_detection: 0.70, camera_lane: 0.60, camera_depth: 0.65}
+  ema_alpha: 0.25
+
+confidence_estimation:
+  detection_signal_weights: {model_score: 0.5, weather_penalty: 0.3, box_stability: 0.2}
+  lane_signal_weights: {model_score: 0.5, weather_penalty: 0.35, curve_consistency: 0.15}
+  depth_signal_weights: {model_score: 0.4, weather_penalty: 0.4, edge_consistency: 0.2}
+  history_length: 30
+velocity:
+  # RelativeVelocityEstimator settings (relative_velocity.py)
+  history_length: 5          # samples kept per track for the velocity estimate
+  max_gap_seconds: 2.0        # if a track's oldest/newest retained sample span
+                                # more than this, the estimate is treated as
+                                # invalid rather than computed across too large
+                                # a real-time gap (relevant given this pipeline's
+                                # variable, sometimes multi-second, CPU latency)
+  ema_alpha: 0.5                # smoothing weight for the velocity estimate
+                                  # (1.0 = no smoothing, raw frame-to-frame diff)
+risk:
+  # RiskEngine settings (risk_engine.py)
+  min_safe_distance_m: 5.0    # distance-only floor: a close but non-closing
+                                # object is still flagged, not marked SAFE
+                                # just because it isn't actively approaching
+  ttc_thresholds_s:             # base TTC thresholds, in CLEAR weather
+    CRITICAL: 1.5
+    WARNING: 3.0
+    CAUTION: 5.0
+  weather_multipliers:          # multiplies the thresholds above per weather
+    clear: 1.00                  # (>1.0 = more conservative: same TTC value
+    overcast: 1.05                # escalates to a worse risk level sooner)
+    rain: 1.30
+    fog: 1.60
+    snow: 1.50
+    night: 1.25
