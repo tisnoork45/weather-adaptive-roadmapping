@@ -64,3 +64,13 @@ dawn_download/
 *.mov
 
 depth_anything_v2_repo/
+
+# Weather-classifier dataset variants and experiment outputs (rebuild/retrain
+# with the commands in README "Training the Weather Classifier")
+data/weather_dataset_*/
+outputs/weather_runs/*/
+
+# Local archives, imported logs and notebook checkpoints
+*.zip
+imported_logs/
+.ipynb_checkpoints/

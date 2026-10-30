@@ -20,7 +20,8 @@ camera:
   width: 1280
   height: 720
   fps: 30
-  intrinsics:
+  intrinsics:            # defined for width x height above; scaled automatically
+                         # for frames of another size (e.g. a 1024x576 video)
     fx: 1000.0
     fy: 1000.0
     cx: 640.0
@@ -67,14 +68,18 @@ depth_estimation:
   max_depth_m: 80.0
 
 weather_classification:
-  # NOTE: no generic checkpoint is downloaded here. Train a real one with:
-  #   python prepare_weather_dataset.py ...
-  #   python models.py --data-dir data/weather_dataset --epochs 15
-  # torchvision's own ImageNet-B0 weights are fetched automatically (and
-  # correctly, with matching key names) inside train_weather_model().
+  # NOTE: no generic checkpoint is downloaded here. The shipped checkpoint was
+  # trained with prepare_weather_dataset.py + merge_dawn_weather.py and
+  #   python models.py --data-dir data/weather_dataset_c3000 --no-test-eval ...
+  # (full procedure and results: README "Training the Weather Classifier").
+  # input_size/mean/std below are fallbacks: a checkpoint's own recorded
+  # "preprocessing" takes precedence, so the model always sees what it saw in training.
   weights_path: "weights/efficientnet_weather.pth"
   input_size: 224
   classes: ["clear", "rain", "fog", "snow", "night", "overcast"]
+  temporal_smoothing_s: 1.0   # time constant for averaging class probabilities
+                              # over time (0 = per-frame labels). Removes
+                              # single-burst flicker; real changes show in ~0.7 s.
   normalize_mean: [0.485, 0.456, 0.406]
   normalize_std: [0.229, 0.224, 0.225]
 

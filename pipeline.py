@@ -25,7 +25,7 @@ from fusion import AdaptiveFusionEngine, ConfidenceEstimator, FusionResult, Modu
 from mapping import BEVMapper, BEVResult
 from models import (
     DepthEstimator, DepthResult, DetectionResult,
-    WeatherClassifier, WeatherResult, YOLODetector,
+    WeatherClassifier, WeatherResult, WeatherTemporalSmoother, YOLODetector,
 )
 from relative_velocity import RelativeVelocity, RelativeVelocityEstimator
 from risk_engine import RiskAssessment, RiskEngine
@@ -41,7 +41,7 @@ class PipelineOutput:
     """Aggregated output of one full pipeline pass over a single frame."""
 
     frame: np.ndarray
-    weather: WeatherResult
+    weather: WeatherResult          # temporally smoothed; what fusion/risk/UI use
     detections: DetectionResult
     depth: DepthResult
     fusion: FusionResult
@@ -53,6 +53,7 @@ class PipelineOutput:
     risk: Optional[RiskAssessment] = None
     metrics: Dict[str, float] = field(default_factory=dict)
     total_latency_ms: float = 0.0
+    weather_raw: Optional[WeatherResult] = None   # this frame's unsmoothed prediction
 
 
 class PerceptionPipeline:
@@ -93,6 +94,9 @@ class PerceptionPipeline:
             normalize_std=config.weather_classification.normalize_std,
             device_preference=device_pref,
         )
+        self.weather_smoother = WeatherTemporalSmoother(
+            time_constant_s=config.weather_classification.get("temporal_smoothing_s", 1.0),
+        )
 
         self.tracker = ByteTracker(
             track_thresh=config.tracking.track_thresh,
@@ -119,6 +123,7 @@ class PerceptionPipeline:
             cx=config.camera.intrinsics.cx, cy=config.camera.intrinsics.cy,
             bev_range_m=config.mapping.bev_range_m, bev_width_m=config.mapping.bev_width_m,
             resolution_px_per_m=config.mapping.bev_resolution_px_per_m,
+            reference_width=config.camera.width, reference_height=config.camera.height,
         )
 
         # NEW: relative velocity (from BEV object positions) -> TTC -> risk.
@@ -167,8 +172,13 @@ class PerceptionPipeline:
         overall_start = time.perf_counter()
         self._frame_index += 1
 
-        weather_result = self.weather_classifier.infer(frame)
-        self.metrics.record_stage("weather", weather_result.inference_time_ms)
+        weather_raw = self.weather_classifier.infer(frame)
+        self.metrics.record_stage("weather", weather_raw.inference_time_ms)
+        # Smooth over time (video timeline when given, else wall clock); every
+        # downstream stage uses the smoothed label so weights/thresholds don't flicker.
+        weather_result = self.weather_smoother.update(
+            weather_raw, timestamp if timestamp is not None else time.perf_counter(),
+        )
 
         detection_result = self.detector.infer(frame)
         self.metrics.record_stage("detection", detection_result.inference_time_ms)
@@ -220,6 +230,7 @@ class PerceptionPipeline:
             depth=depth_result, fusion=fusion_result, bev=bev_result,
             relative_velocities=relative_velocities, risk=risk_result,
             metrics=self.metrics.summary(), total_latency_ms=total_latency_ms,
+            weather_raw=weather_raw,
         )
 
     def _estimate_confidences(self, weather_result: WeatherResult, detection_result: DetectionResult,
@@ -479,13 +490,16 @@ def draw_primary_object_panel(frame: np.ndarray, output: PipelineOutput) -> np.n
 
     obj_risk, det_conf, velocity = primary
     color = RISK_LEVEL_COLORS.get(obj_risk.risk_level, (200, 200, 200))
+    # Distance, speed and TTC all derive from monocular RELATIVE depth rescaled
+    # to an assumed range -- no LiDAR/radar/odometry -- so they are labelled as
+    # uncalibrated estimates (*) rather than presented as measurements.
     rows = [
-        ("Distance", _format_distance(obj_risk.distance_m)),
-        ("Relative Speed", _format_relative_speed(velocity)),
-        ("Time to Collision", _format_ttc(obj_risk.ttc_seconds)),
+        ("Distance*", _format_distance(obj_risk.distance_m)),
+        ("Rel. Speed*", _format_relative_speed(velocity)),
+        ("TTC*", _format_ttc(obj_risk.ttc_seconds)),
         ("Status", obj_risk.risk_level),
     ]
-    panel_h = 40 + 24 * len(rows)
+    panel_h = 40 + 24 * len(rows) + 16
     cv2.rectangle(overlay, (x0, y0), (x0 + panel_w, y0 + panel_h), (18, 22, 26), -1)
     frame = cv2.addWeighted(overlay, 0.72, frame, 0.28, 0)
     cv2.rectangle(frame, (x0, y0), (x0 + panel_w, y0 + panel_h), color, 1)
@@ -506,6 +520,8 @@ def draw_primary_object_panel(frame: np.ndarray, output: PipelineOutput) -> np.n
         cv2.putText(frame, value, (x0 + panel_w - tw - 12, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, val_color, 1, cv2.LINE_AA)
         y += 24
+    cv2.putText(frame, "* uncalibrated monocular-depth estimate", (x0 + 12, y - 4),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (150, 150, 150), 1, cv2.LINE_AA)
     return frame
 
 
@@ -548,7 +564,7 @@ def render_camera_feed(output: PipelineOutput) -> np.ndarray:
     """
     annotated = output.frame.copy()
     dets = output.detections
-    track_ids = [d.track_id if d.track_id is not None else i for i, d in enumerate(dets.detections)]
+    track_ids = [d.track_id for d in dets.detections]  # None = untracked, drawn without an ID
 
     # Per-detection distance, aligned by track_id (not by list position --
     # BEVMapper.project_objects_to_bev() silently drops detections with
@@ -735,9 +751,10 @@ def render_object_table_df(output: PipelineOutput):
             "Track ID": d.track_id if d.track_id is not None else "-",
             "Class": d.class_name,
             "Confidence": round(d.confidence, 3),
-            "Distance": _format_distance(obj_risk.distance_m) if obj_risk else "N/A",
-            "Relative Speed": _format_relative_speed(velocity),
-            "TTC": _format_ttc(obj_risk.ttc_seconds) if obj_risk else "N/A",
+            # Uncalibrated estimates from monocular relative depth (no LiDAR/radar).
+            "Distance (est.)": _format_distance(obj_risk.distance_m) if obj_risk else "N/A",
+            "Rel. Speed (est.)": _format_relative_speed(velocity),
+            "TTC (est.)": _format_ttc(obj_risk.ttc_seconds) if obj_risk else "N/A",
             "Risk": obj_risk.risk_level if obj_risk else "N/A",
         })
     return pd.DataFrame(rows)

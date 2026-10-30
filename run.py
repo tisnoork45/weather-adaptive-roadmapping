@@ -112,7 +112,7 @@ def main() -> None:
 
             annotated = frame.copy()
             dets = output.detections
-            track_ids = [d.track_id if d.track_id is not None else i for i, d in enumerate(dets.detections)]
+            track_ids = [d.track_id for d in dets.detections]  # None = untracked, drawn without an ID
             annotated = draw_detections(annotated, dets.boxes(), dets.labels(), dets.scores(), track_ids)
 
             if args.overlay_depth:
@@ -145,7 +145,10 @@ def main() -> None:
                 if writer is None:
                     h, w = annotated.shape[:2]
                     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                    writer = cv2.VideoWriter(args.output, fourcc, cfg.camera.fps or 30, (w, h))
+                    # Match the source's own frame rate so the saved clip plays
+                    # at real speed (road.mp4 is 23.997 fps, not config's 30).
+                    out_fps = video_fps or cfg.camera.fps or 30
+                    writer = cv2.VideoWriter(args.output, fourcc, out_fps, (w, h))
                 writer.write(annotated)
 
             if args.show:
@@ -164,6 +167,14 @@ def main() -> None:
             if args.max_frames and frame_index >= args.max_frames:
                 logger.info("Reached max-frames limit (%d).", args.max_frames)
                 break
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user after %d frames.", frame_index)
+    except Exception:
+        # Without this, a crash only reached the console: the log file just
+        # stopped mid-run with no explanation (see the last three runs in
+        # imported_logs/logs/pipeline.log).
+        logger.exception("Pipeline crashed at frame %d.", frame_index)
+        raise
     finally:
         if stream is not None:
             stream.release()

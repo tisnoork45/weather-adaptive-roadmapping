@@ -364,15 +364,34 @@ def main() -> None:
     # Split the val pool into val/ (for checkpoint selection) and test/
     # (held out, evaluated once at the end) so the reported accuracy isn't
     # measured on the same split used to pick the best epoch.
+    #
+    # The split is made per recording session, not per image: BDD100K names
+    # are "<session>-<frame>", and frames from one session (sometimes
+    # near-identical) used to land in both val/ and test/ (87 sessions in the
+    # first build), so test wasn't independent of the split used for
+    # checkpoint selection. BDD's own train/val split is already grouped by
+    # session; any session that still appears in the train pool is dropped
+    # from val/test entirely.
+    def session(path: Path) -> str:
+        return path.name.split("-")[0]
+
+    train_sessions = {session(p) for files in train_classes.values() for p in files}
+    val_sessions = sorted({session(p) for files in val_classes.values() for p in files} - train_sessions)
+    rng = random.Random(args.seed + 1)
+    rng.shuffle(val_sessions)
+    test_sessions = set(val_sessions[: int(len(val_sessions) * args.val_fraction_as_test)])
+
     val_pool: Dict[str, List[Path]] = {}
     test_pool: Dict[str, List[Path]] = {}
-    rng = random.Random(args.seed + 1)
+    dropped = 0
     for cls, files in val_classes.items():
-        files = list(files)
-        rng.shuffle(files)
-        n_test = int(len(files) * args.val_fraction_as_test)
-        test_pool[cls] = files[:n_test]
-        val_pool[cls] = files[n_test:]
+        kept = [p for p in files if session(p) not in train_sessions]
+        dropped += len(files) - len(kept)
+        test_pool[cls] = [p for p in kept if session(p) in test_sessions]
+        val_pool[cls] = [p for p in kept if session(p) not in test_sessions]
+    logger.info("Val/test split by recording session: %d test sessions of %d; "
+                "%d val images dropped because their session also appears in train.",
+                len(test_sessions), len(val_sessions), dropped)
 
     logger.info("Copying VAL split (capped at %s per class)...", args.max_per_class_val)
     val_counts = copy_split(val_pool, output_dir, "val", args.max_per_class_val, args.seed, dry_run=False)

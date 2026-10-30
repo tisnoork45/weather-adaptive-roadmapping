@@ -89,7 +89,7 @@ Being precise about this matters for a capstone report. Here is the honest state
 |---|---|---|
 | **Object Detection** (YOLO11x) | ✅ Genuine pretrained deep model | Official Ultralytics COCO-pretrained weights, loaded and run as-is. |
 | **Depth Estimation** (Depth Anything V2) | ✅ Genuine pretrained deep model | Official ViT-S weights. Output is **relative** depth linearly rescaled into an assumed max range for BEV visualization — it is *not* metrically calibrated (no LiDAR ground truth used), so treat BEV distances as approximate, not measured. |
-| **Weather Classification** (EfficientNet-B0) | ✅ Genuine, once you fine-tune it | See the training walkthrough below. Ships with **no** pretrained weather checkpoint by design (see "A note on the previous broken download" below) — you must train one. |
+| **Weather Classification** (EfficientNet-B0) | ✅ Genuine fine-tuned deep model | Fine-tuned on BDD100K + DAWN (see "Selected weather checkpoint and results" below): held-out test accuracy 0.823, macro-F1 0.833. **Dashcam fog performance is not established.** No generic weather checkpoint is downloaded (see "A note on the previous broken download" below). |
 | **Object Tracking** (ByteTrack) | ✅ Genuine, correctly implemented algorithm | ByteTrack is a Kalman-filter + Hungarian-matching *algorithm*, not a neural network — it was never meant to have separate pretrained weights. Fully functional as shipped, no training required. |
 | **Adaptive Sensor Fusion / Confidence Estimation** | ✅ Genuine, by design rule-based | This is the project's engineered "adaptive" logic layer (weather-conditioned weighting + EMA smoothing) — intentionally hand-tuned/heuristic, not a trained model. This is the correct way to build it, not a shortcut. |
 | **BEV Mapping** (Open3D) | ✅ Genuine geometric computation | Deterministic pinhole back-projection, not ML. |
@@ -245,41 +245,102 @@ bdd100k_download\bdd100k\bdd100k\labels\              (label .json files)
 ```
 (If a future re-upload of the mirror nests things slightly differently, just point the paths in Step 2 at wherever the `train`/`val` image folders and the `labels` folder actually ended up — `prepare_weather_dataset.py` accepts either an exact `.json` file or the containing folder for `--labels-train`/`--labels-val`, and will auto-detect the right file by name.)
 
-**Step 2 — build the class-organized dataset:**
-```powershell
-# Preview the class distribution first -- no files copied yet.
-python prepare_weather_dataset.py `
-    --images-train "bdd100k_download\bdd100k\bdd100k\images\100k\train" `
-    --images-val   "bdd100k_download\bdd100k\bdd100k\images\100k\val" `
-    --labels-train "bdd100k_download\bdd100k\bdd100k\labels" `
-    --labels-val   "bdd100k_download\bdd100k\bdd100k\labels" `
-    --dry-run
+**Step 2 — build the class-organized dataset (BDD100K + DAWN).**
 
-# Looks reasonable? Now actually copy the files:
-python prepare_weather_dataset.py `
-    --images-train "bdd100k_download\bdd100k\bdd100k\images\100k\train" `
-    --images-val   "bdd100k_download\bdd100k\bdd100k\images\100k\val" `
-    --labels-train "bdd100k_download\bdd100k\bdd100k\labels" `
-    --labels-val   "bdd100k_download\bdd100k\bdd100k\labels" `
-    --output data/weather_dataset --max-per-class 800
+The commands below are the exact procedure used for the shipped checkpoint (Linux paths; on Windows use backtick `` ` `` line continuations). In this workspace `data/weather_dataset/bdd100k` and `data/weather_dataset/dawn` are symlinks to the raw datasets, which are only ever read, never modified.
+
+```bash
+B=data/weather_dataset/bdd100k
+# 1. BDD100K -> train/val/test. Add --dry-run first to preview the class distribution.
+python prepare_weather_dataset.py \
+    --images-train $B/bdd100k/bdd100k/images/100k/train \
+    --images-val   $B/bdd100k/bdd100k/images/100k/val \
+    --labels-train $B/bdd100k_labels_release/bdd100k/labels \
+    --labels-val   $B/bdd100k_labels_release/bdd100k/labels \
+    --output data/weather_dataset_c3000 \
+    --max-per-class 3000 --max-per-class-val 150 --val-fraction-as-test 0.3 --seed 42
+
+# 2. DAWN fog/rain/snow -> train, with 30% of DAWN fog held out to val/test (15% each).
+python merge_dawn_weather.py --dawn-images data/weather_dataset/dawn --dawn-labels data/weather_dataset/dawn \
+    --dataset-root data/weather_dataset_c3000 --holdout-fraction 0.3
 ```
-(The backtick `` ` `` is PowerShell's line-continuation character — make sure there's a trailing space before it on each line, or just put the whole command on one line.)
 
-This writes `data/weather_dataset/{train,val,test}/<class>/*.jpg` with the six canonical classes, and automatically carves a held-out `test/` split out of the val pool (never used for checkpoint selection, so the final reported accuracy is honest).
+How leakage between splits is prevented (each was a real problem found in an earlier build):
+- **BDD100K recording sessions.** File names are `<session>-<frame>`. `test/` is carved out of the BDD val pool **per session**, so frames from one drive can't sit in both val and test (87 sessions did before), and any session that also appears in BDD's train pool is dropped from val/test.
+- **DAWN exact duplicates.** DAWN ships byte-identical images under different names (e.g. `haze-024`, `haze-039` and `foggy-060` are one file). `merge_dawn_weather.py` deduplicates by SHA-256 (19 skipped).
+- **DAWN near-duplicates.** DAWN also has bursts of near-identical shots, sometimes filed under two conditions. Images within 24 bits on a 256-bit perceptual hash are grouped and each group is kept in one split (28 groups). The threshold was chosen by inspecting pairs: ≤16 bits were the same scene, ≥26 different scenes.
 
-**Known dataset limitation, stated upfront:** `foggy` images are naturally rare in BDD100K (on the order of a few hundred across the whole dataset). The prep script will warn you about this in its class-distribution printout. Report this limitation explicitly rather than hiding it — e.g. by showing the confusion matrix, where a weak fog row is expected and explainable. If you want to strengthen the fog/snow classes, the [DAWN dataset](https://www.kaggle.com/datasets/shuvoalok/dawn-dataset) (1000 real driving images across fog/rain/snow/sandstorm, freely downloadable from Kaggle, no signup beyond a Kaggle account) can supplement those folders manually — just drop extra images into `data/weather_dataset/train/fog/` etc. before training.
+Resulting dataset (`data/weather_dataset_c3000`, 17,328 images, verified: 0 labels disagreeing with the raw BDD JSON / DAWN filenames, 0 shared filenames, 0 identical files and 0 BDD sessions across splits; the near-duplicate check flags 1 cross-split pair at exactly the 24-bit threshold, inspected and confirmed to be two different low-texture scenes, a BDD night-rain windshield and a DAWN fog road):
 
-**Step 3 — train (CPU-friendly):**
-```powershell
-python models.py --data-dir data/weather_dataset --epochs 15 --freeze-backbone
+| class | train (BDD + DAWN) | val (BDD + DAWN) | test (BDD + DAWN) |
+|---|---|---|---|
+| clear | 3000 + 0 | 150 + 0 | 150 + 0 |
+| rain | 3000 + 199 | 150 + 0 | 150 + 0 |
+| fog | 130 + 198 | 9 + 41 | 4 + 44 |
+| snow | 3000 + 203 | 150 + 0 | 150 + 0 |
+| night | 3000 + 0 | 150 + 0 | 150 + 0 |
+| overcast | 3000 + 0 | 150 + 0 | 150 + 0 |
+
+Class mapping from BDD100K attributes (priority order fog > snow > rain > night > overcast > clear): `partly cloudy` counts as **clear**, and rainy/snowy images taken **at night** are labelled **rain/snow**, not night (about 40% of BDD rain images are night-time).
+
+**Step 3 — train on the GPU (validation-only model selection).**
+```bash
+python models.py --data-dir data/weather_dataset_c3000 --output outputs/weather_runs/B_c3000-s42/model.pth \
+    --run-dir outputs/weather_runs/B_c3000-s42 --seed 42 --epochs 20 --num-workers 8 --no-test-eval
 ```
-`--freeze-backbone` trains only the classifier head + last block, which is dramatically faster on a CPU-only laptop at a modest accuracy cost — a reasonable tradeoff to state in your report. Drop it for a full fine-tune if you have time/GPU.
+- Images are decoded and preprocessed by the **same functions** `WeatherClassifier` uses at inference (`load_weather_rgb` + `preprocess_weather_rgb`: OpenCV decode, RGB, squash-resize to 224×224 with `INTER_AREA`, ImageNet normalization). A test asserts the two paths produce identical tensors. Previously training used PIL + torchvision `Resize` while inference used `cv2.resize(INTER_LINEAR)`, which cost the deployed pipeline ~1.6 test-accuracy points.
+- Augmentation: aspect-preserving random crop (80–100% per side), horizontal flip, brightness/contrast jitter. Saturation/hue are **not** jittered, because saturation is a cue separating clear from overcast.
+- Class imbalance: balanced `WeightedRandomSampler` on train plus sqrt-inverse-frequency loss weights. Val/test are never resampled.
+- The best epoch is chosen by **validation macro-F1**. `--no-test-eval` keeps the test split untouched during any run used to compare settings. `--patience N` enables early stopping.
+- Seeded (Python/NumPy/torch, sampler and worker RNGs, deterministic cuDNN). GPU float reductions can still vary slightly, so runs are reproducible to within noise rather than bit-exact.
+- The checkpoint stores `model`, `classes`, `val_acc`, `val_macro_f1`, `best_epoch`, `preprocessing` and `train_config`. `WeatherClassifier` takes input size and normalization from the checkpoint, and warns if a checkpoint predates the shared preprocessing.
 
-This will:
-- Fine-tune from **torchvision's own** ImageNet-B0 weights (correctly key-matched, auto-downloaded).
-- Fix the class-index mapping so the model is always trained against the canonical order `["clear","rain","fog","snow","night","overcast"]`, regardless of how `ImageFolder` alphabetizes the subfolders internally (this was a real bug in the original version — see below).
-- Save `weights/efficientnet_weather.pth` as a dict: `{"model": state_dict, "classes": [...], "val_acc": ...}` — `WeatherClassifier` reads the `"classes"` list back out at inference time, so the label order can never silently mismatch again.
-- Print a full **per-class accuracy table + confusion matrix** on the validation set, and again on the held-out test set if one exists — this is what you should screenshot/report, not just a single "accuracy" number.
+**Step 4 — evaluate on the held-out test set once:** `python outputs/weather_runs/final_eval.py` evaluates `weights/efficientnet_weather.pth` through both the training evaluation code and the real `WeatherClassifier.infer()`. It refuses to run a second time once `outputs/weather_runs/final_test_eval.json` exists.
+
+#### Selected weather checkpoint and results
+
+**How it was chosen.** Two dataset sizes were compared with two seeds each, on validation only:
+
+| training data | val macro-F1 (seeds 42 / 43) | val acc | BDD val macro-F1 excl. fog | train acc at best epoch |
+|---|---|---|---|---|
+| ≤800 BDD per class | 0.786 / 0.774 | 0.781 | 0.785 | 0.973 |
+| **≤3000 BDD per class** | **0.815 / 0.814** | **0.811** | **0.812** | 0.899 |
+
+More data improved every class on validation (rain recall 0.69 → 0.76, overcast 0.79 → 0.84) and reduced overfitting. Validation macro-F1 peaks at epochs 5–6 and then declines, so selecting the best epoch matters. The shipped checkpoint is run `B_c3000-s42` (best epoch 6, val macro-F1 0.815), promoted unchanged to `weights/efficientnet_weather.pth` (SHA-256 `0bda562e…0c28`). The earlier checkpoint is kept read-only as `weights/efficientnet_weather.backup-20261029-df1bd218.pth`.
+
+**Held-out test results** (evaluated once, n = 798; the deployed `WeatherClassifier.infer()` path, which agrees with the batched training evaluation on 797/798 images):
+
+| | accuracy | macro-F1 |
+|---|---|---|
+| All test images | **0.823** | **0.833** |
+| BDD100K dashcam only (n=754) | 0.818 | 0.820 excl. fog (0.739 incl. 4-image fog class) |
+| DAWN only (fog, n=44) | 0.909 (fog recall) | — |
+
+| class | precision | recall | F1 | support |
+|---|---|---|---|---|
+| clear | 0.878 | 0.767 | 0.819 | 150 |
+| rain | 0.817 | 0.713 | 0.762 | 150 |
+| fog | 0.976 | 0.854 | 0.911 | 48 (44 DAWN + 4 BDD) |
+| snow | 0.852 | 0.847 | 0.849 | 150 |
+| night | 0.820 | 0.880 | 0.849 | 150 |
+| overcast | 0.734 | 0.900 | 0.808 | 150 |
+
+```
+true\pred  clear  rain  fog  snow  night  overcast
+clear        115     2    0     9      3        21
+rain           2   107    0     7     17        17
+fog            0     4   41     1      1         1
+snow           7     2    0   127      6         8
+night          0    13    0     3    132         2
+overcast       7     3    1     2      2       135
+```
+
+**Limitations (state these in any report):**
+- **Dashcam fog performance is not established.** The fog score above is almost entirely DAWN (web photos of fog). On BDD100K dashcam fog the model got 1 of 4 test images and 0–1 of 9 validation images right. BDD's own `foggy` labels are unreliable: in a random sample of 20, only about 4 showed visible fog and about half were clear night scenes. Measuring dashcam fog needs a separately hand-verified dashcam fog set (e.g. ACDC fog).
+- **Night-time rain and snow are hard by construction.** They are labelled rain/snow but look like the night class. Most rain errors are rain→night (17) and rain→overcast (17).
+- **Clear vs overcast** is the other main confusion (21 clear→overcast), partly because `partly cloudy` is mapped to clear.
+- Validation and test are small (150 per class; fog 50/48), so differences of about ±0.02 are within noise.
+- The model still overfits somewhat (train ≈ 0.90 vs val ≈ 0.81 at the selected epoch).
 
 ### A note on the previous class-order bug
 The original `train_weather_model()` trained against whatever index order `torchvision.datasets.ImageFolder` happened to assign (alphabetical: `clear, fog, night, overcast, rain, snow`), while `WeatherClassifier` at inference time zipped softmax outputs against `config.yaml`'s declared order (`clear, rain, fog, snow, night, overcast`). Those two orders differ, so every prediction's label would have been silently scrambled (e.g. the model's "index 1" meant `fog` during training but was read as `rain` at inference). This is now fixed by remapping to a single canonical order during training and saving that order into the checkpoint itself, so there is no code path left where the two can drift apart.
@@ -329,14 +390,14 @@ fusion:
 ```bash
 pytest tests.py -v
 ```
-Runs entirely on CPU with synthetic frames: detector interface contracts, confidence/fusion ranges and weather-conditioned ordering (fog ≤ clear), ByteTrack ID persistence + low-confidence recovery, and full end-to-end pipeline execution.
+Runs entirely on CPU with synthetic frames by default; `TEST_DEVICE=cuda pytest tests.py -v` runs the pipeline tests on the GPU instead. Covers: detector interface contracts, confidence/fusion ranges and weather-conditioned ordering (fog ≤ clear), ByteTrack ID persistence + low-confidence recovery, and full end-to-end pipeline execution.
 
 ### Final Testing Checklist (using your `road.mp4`)
 
 Work through these in order; each builds on the previous one.
 
 1. **Baseline regression check.** `pytest tests.py -v` → should still show every test passing after any changes (the fallback/synthetic-frame paths are unaffected by the weather-classifier fixes).
-2. **Confirm weight files present.** `weights/yolo11x.pt` and `weights/depth_anything_v2_vits.pth` should exist; `weights/efficientnet_weather.pth` should exist **only after** you've run the training walkthrough above (its absence is expected and fine — the heuristic fallback handles it).
+2. **Confirm weight files present.** `weights/yolo11x.pt` and `weights/depth_anything_v2_vits.pth` should exist; `weights/efficientnet_weather.pth` should exist (the selected checkpoint above). If it's missing, the pipeline logs a warning and uses the colour heuristic, which is not a trained model.
 3. **Train + evaluate the weather classifier** per the walkthrough above; note the printed overall accuracy and per-class confusion matrix for your report.
 4. **Run on `road.mp4` headless, with output saved:**
    ```bash
@@ -348,7 +409,7 @@ Work through these in order; each builds on the previous one.
    - Depth colormap is spatially sensible (nearer objects/road should look visually distinct from the horizon).
    - BEV panel places detected objects at roughly plausible relative positions.
    - Distance/TTC/risk in the detected-objects table and HUD update sensibly as tracked objects move.
-5. **Run the Streamlit dashboard against `road.mp4`:** set `camera.source: "road.mp4"` in `config.yaml` (or point the dashboard's video source), uncheck "Use synthetic demo stream", and confirm the adaptive sensor-weight bar chart, FPS, and latency panels update live and stay CPU-reasonable.
+5. **Run the Streamlit dashboard against `road.mp4`:** in the sidebar choose **Input source → Video file** and enter `data/sample_videos/road.mp4` (pre-filled when `camera.source` in `config.yaml` is a file path). Video files use video-timeline timestamps, exactly like `run.py`, so velocity/TTC/risk are correct however slow each frame is. Confirm the adaptive sensor-weight bar chart, FPS, and latency panels update live and stay CPU-reasonable.
 6. **Contrast test (optional but strengthens your report):** if you can find or record a second short clip in a visibly different condition (rain/fog/dusk), run it through the same pipeline and confirm the "Adaptive Sensor Weights" chart visibly shifts lower for `camera_depth` compared to the clear clip, and that the risk-level guide's TTC thresholds visibly tighten — this is the actual thesis claim of the project and worth screenshotting for both conditions side-by-side.
 7. **Document limitations explicitly in your report:** relative (not metric) depth, and the weather classifier's per-class accuracy including the naturally-small fog class — see "Model Status" above for the full honest breakdown.
 

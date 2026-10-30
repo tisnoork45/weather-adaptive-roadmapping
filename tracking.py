@@ -146,16 +146,28 @@ class ByteTracker:
         for t in self.lost:
             t.predict()
 
-        # Stage 1: high-confidence detections vs tracked tracks
-        track_boxes = np.array([t.get_box() for t in self.tracked], dtype=np.float32) \
-            if self.tracked else np.empty((0, 4), dtype=np.float32)
+        # Stage 1: high-confidence detections vs tracked AND lost tracks (ByteTrack's
+        # "track pool"). Lost tracks used to be predicted and pruned but never
+        # matched again, so a single missed detection ended a track for good and
+        # the object came back under a new ID -- 23 of 42 IDs on the first 240
+        # frames of road.mp4 were such fragments.
+        pool = self.tracked + self.lost
+        track_boxes = np.array([t.get_box() for t in pool], dtype=np.float32) \
+            if pool else np.empty((0, 4), dtype=np.float32)
         matches, unmatched_tracks, unmatched_dets = self._associate(track_boxes, high_boxes, self.match_thresh)
 
+        recovered = []
         for t_idx, d_idx in matches:
-            self.tracked[t_idx].update(high_boxes[d_idx], float(high_scores[d_idx]))
-            high_dets[d_idx].track_id = self.tracked[t_idx].id
+            pool[t_idx].update(high_boxes[d_idx], float(high_scores[d_idx]))
+            high_dets[d_idx].track_id = pool[t_idx].id
+            if pool[t_idx] in self.lost:
+                recovered.append(pool[t_idx])
+        self.lost = [t for t in self.lost if t not in recovered]
+        self.tracked = self.tracked + recovered
 
-        remaining_tracks = [self.tracked[i] for i in unmatched_tracks]
+        # Only tracks that were tracked last frame go on to stage 2 (low-confidence
+        # detections extend a live track but never revive a lost one).
+        remaining_tracks = [pool[i] for i in unmatched_tracks if pool[i] in self.tracked]
 
         # Stage 2: remaining tracks vs low-confidence detections
         remaining_boxes = np.array([t.get_box() for t in remaining_tracks], dtype=np.float32) \

@@ -2,9 +2,9 @@
 
 Standalone, self-contained script -- does NOT import from or modify any
 other project file (models.py, prepare_weather_dataset.py, utils.py, etc.).
-Only ever writes into data/weather_dataset/train/<class>/ -- val/ and test/
-are never touched, by construction (there is no code path in this script
-that can write to them).
+By default only ever writes into data/weather_dataset/train/<class>/ --
+val/ and test/ are never touched. The one exception is the opt-in
+--holdout-fraction flag (see "Holdout" below).
 
 ===========================================================================
 DAWN's actual directory structure (flat, no per-condition subfolders)
@@ -59,6 +59,21 @@ corresponding label is treated as an orphan/data-integrity issue and is
 skipped with a warning rather than silently included.
 
 ===========================================================================
+Holdout (opt-in: --holdout-fraction)
+===========================================================================
+BDD100K has very few fog images, so val/test end up with almost no fog
+(10 val / 3 test in the logged training run) while train's fog is mostly
+DAWN. That makes fog metrics meaningless. --holdout-fraction F sends a
+fraction F of each --holdout-classes class (default: fog) to val/ and test/
+(F/2 each) instead of train/. Which split an image goes to is a pure
+function of its filename hash, so re-runs are stable; and an image already
+present in ANY split -- matched by file content, since DAWN contains
+byte-identical images under different names -- is skipped, so the same
+image can never end up in both train and val/test (no leakage), even when re-running over a dataset
+merged earlier without a holdout. Those already-in-train images stay in
+train -- move them by hand if you want a larger holdout.
+
+===========================================================================
 USAGE
 ===========================================================================
     # See what WOULD happen -- no files are written:
@@ -66,6 +81,9 @@ USAGE
 
     # Actually copy:
     python merge_dawn_weather.py
+
+    # Hold out 30% of DAWN fog for val/test (15% each):
+    python merge_dawn_weather.py --holdout-fraction 0.3 --dry-run
 
     # Custom paths, if yours differ from the defaults:
     python merge_dawn_weather.py `
@@ -78,6 +96,7 @@ USAGE
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import shutil
 from collections import Counter, defaultdict
@@ -102,6 +121,8 @@ IGNORE_CONDITIONS = {
 }
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+
+SPLITS = ("train", "val", "test")
 
 # Every class this script is capable of writing into. Used as a hard
 # allow-list safety check -- see `_assert_safe_target_dir`.
@@ -133,11 +154,9 @@ def _assert_safe_target_dir(dataset_root: Path) -> Path:
     """Hard-validate --dataset-root itself is not already a split directory
     (train/val/test), then return dataset_root/train.
 
-    Note: because this script's copy logic ALWAYS appends "train" itself
-    (see below), there is no code path anywhere in this script capable of
-    constructing a "val" or "test" destination path -- that guarantee comes
-    from the code structure, not from validating the input. This check
-    instead catches the realistic user error of pointing --dataset-root
+    Note: the copy logic always appends the split name itself ("train", or
+    "val"/"test" only for an explicit --holdout-fraction), so this check
+    exists to catch the realistic user error of pointing --dataset-root
     directly AT a split (e.g. accidentally passing ".../weather_dataset/val"),
     which would otherwise silently produce a nonsensical nested
     ".../weather_dataset/val/train" directory instead of failing loudly.
@@ -237,22 +256,124 @@ def discover_dawn_images(
     return images_by_class, orphan_counts
 
 
+def assign_split(img_name: str, target_class: str, holdout_classes: List[str],
+                 holdout_fraction: float) -> str:
+    """Deterministically pick train/val/test for one image (see "Holdout")."""
+    if holdout_fraction <= 0 or target_class not in holdout_classes:
+        return "train"
+    bucket = int(hashlib.sha1(img_name.encode("utf-8")).hexdigest()[:8], 16) / 2 ** 32
+    if bucket < holdout_fraction / 2:
+        return "val"
+    if bucket < holdout_fraction:
+        return "test"
+    return "train"
+
+
 def plan_copies(
-    images_by_class: Dict[str, List[Path]], train_dir: Path
+    images_by_class: Dict[str, List[Path]], dataset_root: Path,
+    holdout_classes: List[str] = (), holdout_fraction: float = 0.0,
+    near_dup_threshold: int = 24,
 ) -> Dict[str, List[Tuple[Path, Path]]]:
     """For each target class, compute (source, destination) pairs, skipping
-    any destination that already exists (idempotency -- see module docstring).
+    any image already present in ANY split (idempotency, and no train/val/test
+    leakage when the holdout settings differ from a previous run).
+
+    Duplicates are detected by file CONTENT, not just name: DAWN ships
+    byte-identical images under different names (e.g. haze-024, haze-039 and
+    foggy-060 are one file), so name-only checks let the same image land in
+    train and val/test. Only the first copy (in sorted order) of each content
+    hash is used, and anything whose content already exists anywhere in the
+    dataset's splits is skipped.
+
+    DAWN also contains bursts of near-identical shots of one scene (sometimes
+    filed under two conditions, e.g. a rain_storm and a foggy image of the
+    same moment). Images whose perceptual hashes are within
+    `near_dup_threshold` bits are grouped, and each group goes to ONE split:
+    a split already used by a previously copied member, else train if any
+    member is outside `holdout_classes`, else the split of the group's first
+    member by name. Threshold 24 (of 256 bits) was chosen by inspection:
+    pairs <= 16 were the same scene, pairs >= 26 were different scenes.
     """
-    plan: Dict[str, List[Tuple[Path, Path]]] = defaultdict(list)
-    for target_class, paths in images_by_class.items():
-        dest_dir = train_dir / target_class
-        for img_path in paths:
+    existing_hashes = {
+        _sha256(p) for split in SPLITS if (dataset_root / split).is_dir()
+        for p in (dataset_root / split).rglob("*") if p.is_file() and not p.name.startswith("dawn_")
+    }
+    # 1) Exact-content dedupe. Previously copied DAWN files stay in the
+    #    candidate list (marked with their split) so new members of their
+    #    near-duplicate group follow them.
+    candidates: List[Tuple[str, Path, str]] = []   # (class, source, split already on disk or "")
+    seen_hashes = set(existing_hashes)
+    skipped_duplicates = 0
+    for target_class in sorted(images_by_class):
+        for img_path in sorted(images_by_class[target_class]):
             dest_name = f"dawn_{img_path.name}"
-            dest_path = dest_dir / dest_name
-            if dest_path.exists():
-                continue  # already copied in a previous run -- skip, don't duplicate
-            plan[target_class].append((img_path, dest_path))
+            on_disk = next((s for s in SPLITS if (dataset_root / s / target_class / dest_name).exists()), "")
+            content_hash = _sha256(img_path)
+            if content_hash in seen_hashes and not on_disk:
+                skipped_duplicates += 1
+                continue  # identical image already planned or already in the dataset
+            seen_hashes.add(content_hash)
+            candidates.append((target_class, img_path, on_disk))
+
+    # 2) Near-duplicate grouping (union-find over perceptual-hash distance).
+    parent = list(range(len(candidates)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    hashes = [_dhash(path) for _, path, _ in candidates] if near_dup_threshold > 0 else []
+    for i in range(len(hashes)):
+        for j in range(i + 1, len(hashes)):
+            if bin(hashes[i] ^ hashes[j]).count("1") <= near_dup_threshold:
+                parent[find(i)] = find(j)
+    groups: Dict[int, List[int]] = defaultdict(list)
+    for i in range(len(candidates)):
+        groups[find(i)].append(i)
+
+    # 3) One split per group.
+    plan: Dict[str, List[Tuple[Path, Path]]] = defaultdict(list)
+    multi_member_groups = 0
+    for members in groups.values():
+        multi_member_groups += len(members) > 1
+        on_disk_splits = sorted({candidates[i][2] for i in members if candidates[i][2]})
+        if on_disk_splits:
+            split = on_disk_splits[0]
+        elif any(candidates[i][0] not in holdout_classes for i in members):
+            split = "train"
+        else:
+            first = min(members, key=lambda i: candidates[i][1].name)
+            split = assign_split(candidates[first][1].name, candidates[first][0],
+                                 holdout_classes, holdout_fraction)
+        for i in members:
+            target_class, img_path, on_disk = candidates[i]
+            if not on_disk:
+                plan[target_class].append((img_path, dataset_root / split / target_class / f"dawn_{img_path.name}"))
+    log(f"Skipped {skipped_duplicates} images whose exact content is a duplicate "
+        f"(of another DAWN image or of a file already in the dataset).")
+    log(f"Grouped near-duplicate shots into {multi_member_groups} multi-image groups "
+        f"(perceptual-hash distance <= {near_dup_threshold}); each group is kept in one split.")
     return plan
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _dhash(path: Path) -> int:
+    """256-bit difference hash: robust to resizing/re-encoding of the same shot."""
+    from PIL import Image  # only needed here; keeps the rest of the script stdlib-only
+
+    with Image.open(path) as im:
+        small = im.convert("L").resize((17, 16), Image.BILINEAR)
+    px = list(small.getdata())
+    bits = 0
+    for row in range(16):
+        for col in range(16):
+            bits = (bits << 1) | (px[row * 17 + col + 1] > px[row * 17 + col])
+    return bits
 
 
 def count_existing_dawn_files(train_dir: Path) -> Dict[str, int]:
@@ -295,7 +416,7 @@ def execute_copies(plan: Dict[str, List[Tuple[Path, Path]]]) -> Counter:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Merge DAWN dataset images into data/weather_dataset/train/ only."
+        description="Merge DAWN dataset images into data/weather_dataset/train/ (and, with --holdout-fraction, val/ + test/)."
     )
     parser.add_argument("--dawn-images", type=str, default="dawn_download/images",
                          help="Path to DAWN's images directory (flat -- images directly "
@@ -305,11 +426,21 @@ def main() -> None:
                          help="Path to DAWN's labels directory (searched recursively).")
     parser.add_argument("--dataset-root", type=str, default="data/weather_dataset",
                          help="Root of the existing weather dataset. Only its train/ "
-                              "subfolder is ever written to; val/ and test/ under this "
-                              "root are never touched.")
+                              "subfolder is written to unless --holdout-fraction is set.")
     parser.add_argument("--dry-run", action="store_true",
                          help="Report what would be copied without writing any files.")
+    parser.add_argument("--holdout-fraction", type=float, default=0.0,
+                         help="Opt-in: fraction of each --holdout-classes class to send to "
+                              "val/ and test/ (half each) instead of train/. Default 0 = "
+                              "train only.")
+    parser.add_argument("--holdout-classes", nargs="+", default=["fog"],
+                         help="Classes the holdout applies to (default: fog).")
+    parser.add_argument("--near-dup-threshold", type=int, default=24,
+                         help="Group DAWN images whose 256-bit perceptual hashes differ by at "
+                              "most this many bits into one split (0 disables).")
     args = parser.parse_args()
+    if not 0.0 <= args.holdout_fraction < 1.0:
+        parser.error("--holdout-fraction must be in [0, 1).")
 
     images_root = Path(args.dawn_images)
     labels_root = Path(args.dawn_labels)
@@ -327,7 +458,8 @@ def main() -> None:
     images_by_class, _orphan_counts = discover_dawn_images(images_root, label_index)
 
     log("=" * 70)
-    plan = plan_copies(images_by_class, train_dir)
+    plan = plan_copies(images_by_class, dataset_root, args.holdout_classes, args.holdout_fraction,
+                       args.near_dup_threshold)
     already_present = count_existing_dawn_files(train_dir)
 
     log("Per-class summary (eligible = has a matching label):")
@@ -337,6 +469,10 @@ def main() -> None:
         already = already_present.get(cls, 0)
         log(f"  {cls:8s}  eligible={eligible:5d}  already_copied={already:5d}  "
             f"WILL_COPY={would_copy:5d}")
+        if args.holdout_fraction > 0 and cls in args.holdout_classes:
+            by_split = Counter(dest.parent.parent.name for _, dest in plan.get(cls, []))
+            log(f"  {'':8s}  holdout split of WILL_COPY: train={by_split['train']} "
+                f"val={by_split['val']} test={by_split['test']}")
     log("=" * 70)
 
     if args.dry_run:
@@ -345,7 +481,7 @@ def main() -> None:
             f"in total if re-run without --dry-run.")
         return
 
-    log("Copying files into data/weather_dataset/train/ ...")
+    log(f"Copying files into {dataset_root}/{'{train,val,test}' if args.holdout_fraction > 0 else 'train'}/ ...")
     copied = execute_copies(plan)
     for cls in _TARGET_CLASSES:
         log(f"  {cls:8s}  copied_this_run={copied.get(cls, 0)}")
@@ -356,7 +492,10 @@ def main() -> None:
     for cls in _TARGET_CLASSES:
         log(f"  {cls:8s}  total={final_counts.get(cls, 0)}")
     log("=" * 70)
-    log("Done. val/ and test/ under the dataset root were not touched.")
+    if args.holdout_fraction > 0:
+        log(f"Done. Held-out images for {args.holdout_classes} were written to val/ and test/.")
+    else:
+        log("Done. val/ and test/ under the dataset root were not touched.")
 
 
 if __name__ == "__main__":

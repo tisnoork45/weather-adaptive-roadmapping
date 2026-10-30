@@ -278,7 +278,7 @@ def draw_detections(
     boxes: Sequence[Sequence[float]],
     labels: Sequence[str],
     scores: Sequence[float],
-    track_ids: Sequence[int] = None,
+    track_ids: Sequence[Optional[int]] = None,
     distances: Optional[Sequence[Optional[float]]] = None,
     alpha: float = 1.0,
 ) -> np.ndarray:
@@ -289,13 +289,16 @@ def draw_detections(
     for i, box in enumerate(boxes):
         x1, y1, x2, y2 = [int(v) for v in box]
         tid = track_ids[i] if track_ids is not None else i
-        color = color_for_id(tid)
+        # A detection the tracker didn't assign (an unmatched low-confidence
+        # box) is drawn grey with no ID, rather than with its list index,
+        # which looked like -- and could collide with -- a real track ID.
+        color = color_for_id(tid) if tid is not None else (160, 160, 160)
         cv2.rectangle(target, (x1, y1), (x2, y2), color, 2)
 
         label = labels[i] if i < len(labels) else "obj"
         score = scores[i] if i < len(scores) else 0.0
         tag = f"{label} {score:.2f}"
-        if track_ids is not None:
+        if track_ids is not None and tid is not None:
             tag = f"ID:{tid} {tag}"
         if distances is not None and i < len(distances) and distances[i] is not None:
             tag = f"{tag} {distances[i]:.1f}m"

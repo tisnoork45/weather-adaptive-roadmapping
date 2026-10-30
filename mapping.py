@@ -53,12 +53,36 @@ class BEVMapper:
 
     def __init__(self, fx: float, fy: float, cx: float, cy: float,
                  bev_range_m: float = 60.0, bev_width_m: float = 40.0,
-                 resolution_px_per_m: float = 10.0) -> None:
+                 resolution_px_per_m: float = 10.0,
+                 reference_width: Optional[int] = None, reference_height: Optional[int] = None) -> None:
+        # fx/fy/cx/cy are defined for a reference_width x reference_height
+        # image (config.yaml's camera.width/height). Frames of another size
+        # (road.mp4 is 1024x576 vs the configured 1280x720) get the
+        # intrinsics scaled to match in `_use_frame_size`; without that, the
+        # principal point sat 128 px right of the image centre and every
+        # object was placed ~2.6 m too far left at 20 m. Scaling assumes the
+        # same camera at a different resolution (same field of view, no crop).
+        self._base_intrinsics = (fx, fy, cx, cy)
+        self._reference_size = (reference_width, reference_height) if reference_width and reference_height else None
+        self._active_size: Optional[Tuple[int, int]] = None
         self.fx, self.fy, self.cx, self.cy = fx, fy, cx, cy
         self.bev_range_m, self.bev_width_m = bev_range_m, bev_width_m
         self.resolution = resolution_px_per_m
         self.bev_h = int(bev_range_m * resolution_px_per_m)
         self.bev_w = int(bev_width_m * resolution_px_per_m)
+
+    def _use_frame_size(self, width: int, height: int) -> None:
+        """Scale the reference intrinsics to a width x height image (no-op without a reference size)."""
+        if self._reference_size is None or self._active_size == (width, height):
+            return
+        fx, fy, cx, cy = self._base_intrinsics
+        sx, sy = width / self._reference_size[0], height / self._reference_size[1]
+        self.fx, self.fy, self.cx, self.cy = fx * sx, fy * sy, cx * sx, cy * sy
+        self._active_size = (width, height)
+        if (sx, sy) != (1.0, 1.0):
+            logger.info("BEV: %dx%d frames; scaled camera intrinsics from %dx%d reference to "
+                        "fx=%.1f fy=%.1f cx=%.1f cy=%.1f", width, height, *self._reference_size,
+                        self.fx, self.fy, self.cx, self.cy)
 
     def pixel_to_ground_point(self, u: float, v: float, depth_m: float) -> Tuple[float, float, float]:
         z = float(depth_m)
@@ -170,6 +194,8 @@ class BEVMapper:
 
     def build_bev(self, frame: np.ndarray, depth_map: np.ndarray, detections: List[Detection]) -> BEVResult:
         start = time.perf_counter()
+        # All projections below work in depth-map pixel coordinates.
+        self._use_frame_size(depth_map.shape[1], depth_map.shape[0])
         points, colors = self.build_point_cloud(frame, depth_map, stride=10)
         pcd = self.to_open3d_point_cloud(points, colors)
         bev_objects = self.project_objects_to_bev(detections, depth_map)

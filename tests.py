@@ -8,8 +8,13 @@ Run with:
 All tests run on CPU with synthetic frames only -- no GPU, dataset, or
 pretrained weights required -- since every model wrapper gracefully falls
 back to a classical CV / heuristic implementation when weights are absent.
+
+Set TEST_DEVICE=cuda (or auto) to run the pipeline tests on the GPU, so the
+real Depth Anything V2 / YOLO11x paths are exercised there too:
+    TEST_DEVICE=cuda pytest tests.py -v
 """
 
+import os
 
 import cv2
 import numpy as np
@@ -21,6 +26,8 @@ from pipeline import PerceptionPipeline, PipelineOutput
 from tracking import ByteTracker, cxcyah_to_xyxy, iou_batch, xyxy_to_cxcyah
 from utils import generate_synthetic_frame, load_config
 
+TEST_DEVICE = os.environ.get("TEST_DEVICE", "cpu")
+
 # =============================================================================
 # Detection tests
 # =============================================================================
@@ -28,8 +35,15 @@ from utils import generate_synthetic_frame, load_config
 
 @pytest.fixture(scope="module")
 def detector() -> YOLODetector:
+    # allow_download=False: this fixture exists to exercise the classical
+    # fallback detector. Previously ultralytics silently auto-downloaded real
+    # YOLO11x weights here, so the fallback was never actually tested.
     return YOLODetector(weights_path="weights/nonexistent_yolo11x.pt",
-                         confidence_threshold=0.3, device_preference="cpu")
+                         confidence_threshold=0.3, device_preference="cpu", allow_download=False)
+
+
+def test_detector_uses_fallback_when_weights_missing(detector: YOLODetector) -> None:
+    assert detector._use_fallback
 
 
 def test_detector_initializes(detector: YOLODetector) -> None:
@@ -52,6 +66,21 @@ def test_detection_result_helpers(detector: YOLODetector) -> None:
     frame = generate_synthetic_frame(width=640, height=480, seed=2)
     result = detector.infer(frame)
     assert len(result.boxes()) == len(result) == len(result.labels()) == len(result.scores())
+
+
+@pytest.mark.skipif(not os.path.exists("weights/depth_anything_v2_vits.pth"),
+                    reason="Depth Anything V2 weights not present")
+def test_depth_real_inference_runs_on_requested_cpu_device() -> None:
+    """Regression: depth_anything_v2/dpt.py used to send its input to CUDA
+    whenever CUDA existed, even with the model on CPU, so every frame failed
+    and silently fell back. Call _real_infer directly so a failure surfaces
+    instead of being swallowed by infer()'s fallback."""
+    from models import DepthEstimator
+
+    estimator = DepthEstimator(device_preference="cpu", input_size=154)
+    assert not estimator._use_fallback
+    depth = estimator._real_infer(generate_synthetic_frame(width=640, height=480, seed=3))
+    assert depth.shape == (480, 640)
 
 
 def test_detection_center_and_dims() -> None:
@@ -178,7 +207,7 @@ def test_tracker_low_confidence_recovery() -> None:
 @pytest.fixture(scope="module")
 def pipeline() -> PerceptionPipeline:
     config = load_config("config.yaml")
-    config.device.preference = "cpu"
+    config.device.preference = TEST_DEVICE
     return PerceptionPipeline(config)
 
 
@@ -412,7 +441,7 @@ def pipeline_no_bev() -> PerceptionPipeline:
     velocity/TTC/risk stage degrades to empty/None instead of crashing when
     its only data source (BEV object positions) never exists."""
     config = load_config("config.yaml")
-    config.device.preference = "cpu"
+    config.device.preference = TEST_DEVICE
     config.pipeline.run_bev_mapping = False
     return PerceptionPipeline(config)
 
@@ -535,3 +564,208 @@ def test_end_to_end_ttc_risk_escalation_with_pipeline_config(pipeline: Perceptio
     order = {"SAFE": 0, "CAUTION": 1, "WARNING": 2, "CRITICAL": 3}
     assert order[fog_level] >= order[clear_level]
     assert fog_level != clear_level
+
+
+# =============================================================================
+# Weather classifier: preprocessing parity + training pipeline
+# =============================================================================
+
+
+def _capturing_weather_classifier(tmp_path):
+    """A WeatherClassifier whose 'model' records the exact tensor it receives."""
+    import torch
+    from models import WeatherClassifier
+
+    classifier = WeatherClassifier(weights_path=str(tmp_path / "missing.pth"), device_preference="cpu")
+    captured = {}
+
+    class _Capture(torch.nn.Module):
+        def forward(self, x):
+            captured["input"] = x.detach().cpu().clone()
+            return torch.zeros(x.shape[0], len(classifier.classes))
+
+    classifier.model, classifier._use_fallback = _Capture(), False
+    return classifier, captured
+
+
+def test_weather_training_and_inference_preprocessing_are_identical(tmp_path) -> None:
+    """Regression: training (PIL + torchvision Resize) and WeatherClassifier
+    (cv2.resize INTER_LINEAR) used to preprocess differently, costing ~1.6
+    accuracy points in the deployed pipeline. Both must now produce the exact
+    same tensor from the same image file."""
+    import torch
+    from models import WeatherEvalTransform, load_weather_rgb
+
+    path = tmp_path / "frame.jpg"
+    cv2.imwrite(str(path), generate_synthetic_frame(width=1280, height=720, seed=7))
+    classifier, captured = _capturing_weather_classifier(tmp_path)
+
+    classifier._neural_infer(cv2.imread(str(path)))  # what the live pipeline does with a BGR frame
+    training_tensor = WeatherEvalTransform(classifier.input_size, classifier.mean, classifier.std)(load_weather_rgb(path))
+
+    assert captured["input"].shape == (1, 3, classifier.input_size, classifier.input_size)
+    assert torch.equal(captured["input"][0], training_tensor)
+
+
+def test_weather_train_transform_output_matches_eval_shape() -> None:
+    from models import WeatherTrainTransform
+
+    rgb = cv2.cvtColor(generate_synthetic_frame(width=1280, height=720, seed=8), cv2.COLOR_BGR2RGB)
+    out = WeatherTrainTransform(224, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])(rgb)
+    assert out.shape == (3, 224, 224) and out.dtype.is_floating_point
+
+
+def test_train_weather_model_smoke(tmp_path) -> None:
+    """End-to-end: tiny synthetic dataset -> checkpoint -> WeatherClassifier
+    loads it without falling back; evaluate_test=False never touches test/."""
+    import json
+    from models import DEFAULT_WEATHER_CLASSES, WeatherClassifier, train_weather_model
+
+    data = tmp_path / "ds"
+    for split, n in (("train", 2), ("val", 1), ("test", 1)):
+        for c, cls in enumerate(DEFAULT_WEATHER_CLASSES):
+            (data / split / cls).mkdir(parents=True)
+            for i in range(n):
+                name = f"dawn_{cls}-{i}.jpg" if cls == "fog" and i == 0 else f"{cls}-{i}.jpg"
+                frame = generate_synthetic_frame(width=640, height=480, seed=c * 10 + i)
+                cv2.imwrite(str(data / split / cls / name), frame)
+
+    ckpt, run_dir = tmp_path / "w.pth", tmp_path / "run"
+    summary = train_weather_model(
+        data_dir=str(data), output_path=str(ckpt), epochs=1, batch_size=4, num_workers=0,
+        pretrained=False, evaluate_test=False, run_dir=str(run_dir),
+    )
+    report = json.loads((run_dir / "report.json").read_text())
+    assert summary["best_epoch"] == 1 and "test" not in report and "test_accuracy" not in summary
+    assert set(report["validation"]["by_source"]) == {"bdd", "dawn"}
+
+    classifier = WeatherClassifier(weights_path=str(ckpt), device_preference="cpu")
+    assert not classifier._use_fallback
+    assert classifier.infer(generate_synthetic_frame(width=640, height=480, seed=1)).label in DEFAULT_WEATHER_CLASSES
+
+
+# =============================================================================
+# Weather temporal smoothing + BEV intrinsics scaling
+# =============================================================================
+
+
+def _weather(label: str, p: float = 0.9):
+    from models import DEFAULT_WEATHER_CLASSES, WeatherResult
+
+    rest = (1.0 - p) / (len(DEFAULT_WEATHER_CLASSES) - 1)
+    probs = {c: (p if c == label else rest) for c in DEFAULT_WEATHER_CLASSES}
+    return WeatherResult(label=label, confidence=p, probabilities=probs)
+
+
+def test_weather_smoother_suppresses_short_burst_and_follows_sustained_change() -> None:
+    from models import WeatherTemporalSmoother
+
+    s, fps, t = WeatherTemporalSmoother(time_constant_s=1.0), 24.0, 0.0
+    for _ in range(48):                      # 2 s of clear
+        out = s.update(_weather("clear"), t); t += 1 / fps
+    for _ in range(12):                      # 0.5 s glare burst read as snow
+        out = s.update(_weather("snow", 0.8), t); t += 1 / fps
+        assert out.label == "clear"
+    for _ in range(72):                      # 3 s of real rain
+        out = s.update(_weather("rain"), t); t += 1 / fps
+    assert out.label == "rain"
+    assert abs(sum(out.probabilities.values()) - 1.0) < 1e-6
+
+
+def test_weather_smoother_resets_on_backwards_time_and_can_be_disabled() -> None:
+    from models import WeatherTemporalSmoother
+
+    s = WeatherTemporalSmoother(time_constant_s=1.0)
+    for i in range(48):
+        s.update(_weather("clear"), i / 24)
+    assert s.update(_weather("night"), 0.0).label == "night"     # new video restarts at t=0
+    off = WeatherTemporalSmoother(time_constant_s=0.0)
+    off.update(_weather("clear"), 0.0)
+    assert off.update(_weather("fog"), 0.04).label == "fog"
+
+
+def test_bev_intrinsics_scale_with_frame_size() -> None:
+    from mapping import BEVMapper
+
+    def x_at(width: int, height: int, u_frac: float) -> float:
+        bev = BEVMapper(fx=1000, fy=1000, cx=640, cy=360, reference_width=1280, reference_height=720)
+        depth = np.full((height, width), 20.0, dtype=np.float32)
+        u = u_frac * width
+        det = Detection(box=[u - 10, 0.5 * height, u + 10, 0.8 * height], class_id=2, class_name="car",
+                        confidence=0.9, track_id=1)
+        return bev.build_bev(np.zeros((height, width, 3), np.uint8), depth, [det]).objects[0].x_m
+
+    assert abs(x_at(1024, 576, 0.5)) < 0.05                     # centred object is straight ahead
+    assert abs(x_at(1024, 576, 0.75) - x_at(1280, 720, 0.75)) < 0.05   # same metres at any resolution
+    unscaled = BEVMapper(fx=1000, fy=1000, cx=640, cy=360)      # no reference size: unchanged behaviour
+    unscaled._use_frame_size(1024, 576)
+    assert (unscaled.fx, unscaled.cx) == (1000, 640)
+
+
+def test_pipeline_output_has_smoothed_and_raw_weather(pipeline: PerceptionPipeline) -> None:
+    out = pipeline.process(generate_synthetic_frame(width=640, height=480, seed=3), timestamp=100.0)
+    assert out.weather_raw is not None
+    assert out.weather.label in out.weather.probabilities
+
+
+# =============================================================================
+# Tracker persistence: lost tracks are re-associated (ByteTrack track pool)
+# =============================================================================
+
+
+def _det(box, conf=0.9):
+    return Detection(box=list(box), class_id=2, class_name="car", confidence=conf)
+
+
+def _moving_box(i, x0=100.0, speed=4.0):
+    return (x0 + speed * i, 200.0, x0 + 80 + speed * i, 260.0)
+
+
+def test_tracker_recovers_same_id_after_missed_detections() -> None:
+    """Regression: lost tracks were never matched again, so a 1-frame detection
+    dropout permanently ended a track (23 of 42 IDs on road.mp4 were such fragments)."""
+    tracker = ByteTracker(track_thresh=0.5, track_buffer=30, match_thresh=0.8)
+    ids = []
+    for i in range(20):
+        if 8 <= i < 11:                      # detector misses the object for 3 frames
+            tracker.update([])
+            continue
+        ids.append(tracker.update([_det(_moving_box(i))])[0].track_id)
+    assert len(set(ids)) == 1
+
+
+def test_tracker_does_not_give_a_distant_new_object_a_lost_id() -> None:
+    tracker = ByteTracker(track_thresh=0.5, track_buffer=30, match_thresh=0.8)
+    first = [tracker.update([_det(_moving_box(i))])[0].track_id for i in range(5)][-1]
+    tracker.update([])
+    far = tracker.update([_det((900.0, 500.0, 980.0, 560.0))])[0].track_id
+    assert far != first
+
+
+def test_tracker_lost_track_expires_after_buffer() -> None:
+    tracker = ByteTracker(track_thresh=0.5, track_buffer=5, match_thresh=0.8, frame_rate=30)
+    first = [tracker.update([_det((100.0, 200.0, 180.0, 260.0))])[0].track_id for _ in range(5)][-1]
+    for _ in range(7):                       # longer than the 5-frame buffer
+        tracker.update([])
+    assert tracker.update([_det((100.0, 200.0, 180.0, 260.0))])[0].track_id != first
+
+
+def test_tracker_low_confidence_detection_does_not_revive_lost_track() -> None:
+    tracker = ByteTracker(track_thresh=0.5, track_buffer=30, match_thresh=0.8)
+    for _ in range(5):
+        tracker.update([_det((100.0, 200.0, 180.0, 260.0))])
+    tracker.update([])
+    assert tracker.update([_det((100.0, 200.0, 180.0, 260.0), conf=0.3)])[0].track_id is None
+
+
+def test_untracked_detection_is_drawn_without_an_id(monkeypatch) -> None:
+    """Untracked detections used to be labelled with their list index ("ID:1"),
+    which looked like -- and could collide with -- a real track ID."""
+    import utils
+
+    texts = []
+    real_put_text = utils.cv2.putText
+    monkeypatch.setattr(utils.cv2, "putText", lambda img, text, *a, **k: (texts.append(text), real_put_text(img, text, *a, **k))[1])
+    utils.draw_detections(np.zeros((200, 300, 3), np.uint8), [[10, 40, 80, 90], [120, 40, 200, 90]],
+                          ["car", "car"], [0.9, 0.4], [7, None])
+    assert texts == ["ID:7 car 0.90", "car 0.40"]
