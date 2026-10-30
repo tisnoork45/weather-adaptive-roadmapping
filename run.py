@@ -4,6 +4,7 @@ Examples:
     python run.py --source 0 --show
     python run.py --source data/sample_videos/demo.mp4 --output outputs/videos/out.mp4
     python run.py --synthetic --show --max-frames 300
+    python run.py --source road.mp4 --depth-mode metric --strict --max-frames 240 --output out.mp4
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from pathlib import Path
 
 import cv2
 
-from pipeline import PerceptionPipeline, draw_ego_speed_panel, draw_primary_object_panel
+from pipeline import PerceptionPipeline, display_depth, draw_ego_speed_panel, draw_primary_object_panel
 from utils import (
     VideoStream, draw_detections, draw_hud, draw_risk_level_guide, draw_sensor_status_panel,
     generate_synthetic_frame, get_logger, load_config, overlay_depth_map,
@@ -32,6 +33,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=str, default=None, help="Path to save an annotated output video.")
     parser.add_argument("--max-frames", type=int, default=0, help="Stop after N frames (0 = unlimited).")
     parser.add_argument("--overlay-depth", action="store_true", help="Overlay depth colormap on the feed.")
+    parser.add_argument("--depth-mode", choices=["relative", "metric"], default=None,
+                         help="Override config.yaml's depth_estimation.mode for this run.")
+    parser.add_argument("--strict", action="store_true",
+                         help="Fail instead of falling back to heuristic models (overrides config.yaml).")
     return parser.parse_args()
 
 
@@ -49,6 +54,11 @@ def resolve_source(args, cfg):
 def main() -> None:
     args = parse_args()
     cfg = load_config("config.yaml")
+    # Command-line overrides apply to this run only; config.yaml is not modified.
+    if args.depth_mode is not None:
+        cfg.depth_estimation["mode"] = args.depth_mode
+    if args.strict:
+        cfg.pipeline["strict"] = True
 
     logger.info("Building perception pipeline...")
     pipeline = PerceptionPipeline(cfg)
@@ -116,7 +126,7 @@ def main() -> None:
             annotated = draw_detections(annotated, dets.boxes(), dets.labels(), dets.scores(), track_ids)
 
             if args.overlay_depth:
-                annotated = overlay_depth_map(annotated, output.depth.depth_map)
+                annotated = overlay_depth_map(annotated, display_depth(output.depth))
 
             # HUD layer, drawn last so it always sits on top of the frame /
             # depth overlay / bounding boxes. Panels are anchored to the four
@@ -133,7 +143,7 @@ def main() -> None:
             )
             annotated = draw_sensor_status_panel(
                 annotated, module_confidences=output.fusion.module_confidences,
-                tracking_active=cfg.pipeline.run_tracking, bev_active=cfg.pipeline.run_bev_mapping,
+                tracking_active=cfg.pipeline.run_tracking, bev_active=output.bev is not None,  # off for non-metric depth
                 overall_scene_confidence=output.fusion.overall_scene_confidence,
             )
             annotated = draw_primary_object_panel(annotated, output)
@@ -160,9 +170,9 @@ def main() -> None:
                     break
 
             if frame_index % 30 == 0:
-                logger.info("Frame %d | FPS=%.1f | Weather=%s | Objects=%d | Latency=%.1fms",
+                logger.info("Frame %d | FPS=%.1f | Weather=%s | Objects=%d | Depth=%s | Latency=%.1fms",
                             frame_index, output.metrics.get("fps", 0.0), output.weather.label,
-                            len(output.detections), output.total_latency_ms)
+                            len(output.detections), output.depth.kind, output.total_latency_ms)
 
             if args.max_frames and frame_index >= args.max_frames:
                 logger.info("Reached max-frames limit (%d).", args.max_frames)

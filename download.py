@@ -130,10 +130,32 @@ def _explain_weather_unavailable(cfg) -> bool:
     return True
 
 
+def download_metric_depth(cfg) -> bool:
+    """Depth Anything V2 Metric Outdoor (Virtual KITTI 2) ViT-S, pinned to a Hugging Face
+    revision and checked against the recorded SHA-256 (a mismatching file is removed)."""
+    import hashlib
+
+    dc = cfg.depth_estimation
+    if not download_file(dc.metric_download_url, dc.metric_weights_path):
+        return False
+    h = hashlib.sha256()
+    with open(dc.metric_weights_path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    if h.hexdigest() != dc.metric_sha256:
+        logger.error("SHA-256 mismatch for %s (got %s, expected %s); removing it.",
+                     dc.metric_weights_path, h.hexdigest(), dc.metric_sha256)
+        Path(dc.metric_weights_path).unlink(missing_ok=True)
+        return False
+    logger.info("Verified SHA-256 of %s", dc.metric_weights_path)
+    return True
+
+
 def download_models(cfg, only=None) -> None:
     downloaders: Dict[str, Callable] = {
         "yolo": download_yolo,
         "depth": lambda c: download_file(c.depth_estimation.download_url, c.depth_estimation.weights_path),
+        "depth_metric": download_metric_depth,
         "lane": _explain_lane_unavailable,
         "weather": _explain_weather_unavailable,
     }
@@ -264,7 +286,7 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     models_parser = subparsers.add_parser("models", help="Download pretrained model weights.")
-    models_parser.add_argument("--only", nargs="*", choices=["yolo", "depth", "lane", "weather"])
+    models_parser.add_argument("--only", nargs="*", choices=["yolo", "depth", "depth_metric", "lane", "weather"])
 
     dataset_parser = subparsers.add_parser("dataset", help="Set up a dataset or simulator.")
     dataset_parser.add_argument("name", nargs="?", choices=["nuscenes-mini", "seeing-through-fog", "carla"])

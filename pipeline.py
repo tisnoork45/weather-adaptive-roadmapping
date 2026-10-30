@@ -21,11 +21,12 @@ import numpy as np
 
 import cv2
 
+from camera import CameraModel
 from fusion import AdaptiveFusionEngine, ConfidenceEstimator, FusionResult, ModuleConfidence
 from mapping import BEVMapper, BEVResult
 from models import (
-    DepthEstimator, DepthResult, DetectionResult,
-    WeatherClassifier, WeatherResult, WeatherTemporalSmoother, YOLODetector,
+    DEPTH_KIND_HEURISTIC, DEPTH_KIND_NONE, DEPTH_KIND_RELATIVE, DepthEstimator, DepthResult,
+    DetectionResult, WeatherClassifier, WeatherResult, WeatherTemporalSmoother, YOLODetector,
 )
 from relative_velocity import RelativeVelocity, RelativeVelocityEstimator
 from risk_engine import RiskAssessment, RiskEngine
@@ -45,15 +46,17 @@ class PipelineOutput:
     detections: DetectionResult
     depth: DepthResult
     fusion: FusionResult
-    bev: Optional[BEVResult]
+    bev: Optional[BEVResult]        # None unless BEV mapping is enabled AND depth is metric
     # NEW: populated only when BEV mapping is enabled and produced at least
     # one tracked object with a valid depth-derived position; otherwise
     # relative_velocities stays {} and risk stays None (no crash either way).
+    # Relative or heuristic depth has no unit, so it never reaches BEV/velocity/TTC/risk.
     relative_velocities: Dict[int, RelativeVelocity] = field(default_factory=dict)
     risk: Optional[RiskAssessment] = None
     metrics: Dict[str, float] = field(default_factory=dict)
     total_latency_ms: float = 0.0
     weather_raw: Optional[WeatherResult] = None   # this frame's unsmoothed prediction
+    camera: Optional[CameraModel] = None           # intrinsics used for this frame
 
 
 class PerceptionPipeline:
@@ -67,7 +70,11 @@ class PerceptionPipeline:
         self.config = config
         device_pref = config.device.preference
 
-        logger.info("Initializing perception pipeline modules...")
+        strict = bool(config.pipeline.get("strict", False))
+        depth_cfg = config.depth_estimation
+        self.depth_mode = depth_cfg.get("mode", "relative")
+        logger.info("Initializing perception pipeline modules (depth mode: %s, strict: %s)...",
+                    self.depth_mode, strict)
 
         self.detector = YOLODetector(
             weights_path=config.detection.weights_path,
@@ -76,14 +83,18 @@ class PerceptionPipeline:
             input_size=config.detection.input_size,
             classes_of_interest=config.detection.classes_of_interest,
             device_preference=device_pref,
+            strict=strict,
         )
 
         self.depth_estimator = DepthEstimator(
-            weights_path=config.depth_estimation.weights_path,
-            encoder=config.depth_estimation.encoder,
-            input_size=config.depth_estimation.input_size,
-            max_depth_m=config.depth_estimation.max_depth_m,
+            weights_path=depth_cfg.metric_weights_path if self.depth_mode == "metric" else depth_cfg.weights_path,
+            encoder=depth_cfg.encoder,
+            input_size=depth_cfg.input_size,
+            max_depth_m=depth_cfg.max_depth_m,
             device_preference=device_pref,
+            mode=self.depth_mode,
+            strict=strict,
+            ignore_bottom_rows_fraction=depth_cfg.get("ignore_bottom_rows_fraction", 0.0),
         )
 
         self.weather_classifier = WeatherClassifier(
@@ -93,6 +104,7 @@ class PerceptionPipeline:
             normalize_mean=config.weather_classification.normalize_mean,
             normalize_std=config.weather_classification.normalize_std,
             device_preference=device_pref,
+            strict=strict,
         )
         self.weather_smoother = WeatherTemporalSmoother(
             time_constant_s=config.weather_classification.get("temporal_smoothing_s", 1.0),
@@ -125,6 +137,9 @@ class PerceptionPipeline:
             resolution_px_per_m=config.mapping.bev_resolution_px_per_m,
             reference_width=config.camera.width, reference_height=config.camera.height,
         )
+        # Intrinsics for frames that don't bring their own (video/webcam/synthetic).
+        self.default_camera = CameraModel.from_config(config.camera)
+        self._warned_aspect = False
 
         # NEW: relative velocity (from BEV object positions) -> TTC -> risk.
         # Reads the `velocity:`/`risk:` sections already present in
@@ -148,11 +163,26 @@ class PerceptionPipeline:
         self._frame_index = 0
         logger.info("All perception pipeline modules initialized successfully.")
 
-    def process(self, frame: np.ndarray, timestamp: Optional[float] = None) -> PipelineOutput:
+    def camera_for(self, frame: np.ndarray) -> CameraModel:
+        """config.yaml's camera scaled to this frame. A calibrated camera must keep its
+        aspect ratio; placeholder intrinsics keep the old per-axis scaling (with a warning)."""
+        h, w = frame.shape[:2]
+        cam = self.default_camera
+        mismatched = abs((w / h) / (cam.width / cam.height) - 1.0) > 0.01
+        if mismatched and not cam.calibrated and not self._warned_aspect:
+            logger.warning("Frames are %dx%d but the uncalibrated config camera is %dx%d; scaling each axis "
+                           "separately (approximate geometry).", w, h, cam.width, cam.height)
+            self._warned_aspect = True
+        return cam.scaled_to(w, h, allow_aspect_change=not cam.calibrated)
+
+    def process(self, frame: np.ndarray, timestamp: Optional[float] = None,
+                camera: Optional[CameraModel] = None) -> PipelineOutput:
         """Run the full perception stack on a single BGR frame.
 
         Args:
             frame: BGR frame.
+            camera: this frame's intrinsics (e.g. a dataset's calibration);
+                defaults to config.yaml's camera scaled to the frame size.
             timestamp: the real-world (or video-timeline) time, in seconds,
                 that this frame represents -- used only by the relative-
                 velocity estimator to compute elapsed time between
@@ -171,6 +201,7 @@ class PerceptionPipeline:
         """
         overall_start = time.perf_counter()
         self._frame_index += 1
+        camera = camera if camera is not None else self.camera_for(frame)
 
         weather_raw = self.weather_classifier.infer(frame)
         self.metrics.record_stage("weather", weather_raw.inference_time_ms)
@@ -191,7 +222,7 @@ class PerceptionPipeline:
         if self.pipeline_cfg.run_depth_estimation:
             depth_result = self.depth_estimator.infer(frame)
         else:
-            depth_result = DepthResult(depth_map=np.zeros(frame.shape[:2], dtype=np.float32))
+            depth_result = DepthResult(depth_map=np.zeros(frame.shape[:2], dtype=np.float32), kind=DEPTH_KIND_NONE)
         self.metrics.record_stage("depth", depth_result.inference_time_ms)
 
         fusion_start = time.perf_counter()
@@ -200,9 +231,10 @@ class PerceptionPipeline:
         self.metrics.record_stage("fusion", (time.perf_counter() - fusion_start) * 1000.0)
 
         bev_result = None
-        if self.pipeline_cfg.run_bev_mapping:
+        if self.pipeline_cfg.run_bev_mapping and depth_result.is_metric:
             bev_result = self.bev_mapper.build_bev(
                 frame, depth_result.depth_map, detection_result.detections,
+                camera=camera, valid_mask=depth_result.valid_mask,
             )
             self.metrics.record_stage("bev", bev_result.inference_time_ms)
 
@@ -230,7 +262,7 @@ class PerceptionPipeline:
             depth=depth_result, fusion=fusion_result, bev=bev_result,
             relative_velocities=relative_velocities, risk=risk_result,
             metrics=self.metrics.summary(), total_latency_ms=total_latency_ms,
-            weather_raw=weather_raw,
+            weather_raw=weather_raw, camera=camera,
         )
 
     def _estimate_confidences(self, weather_result: WeatherResult, detection_result: DetectionResult,
@@ -243,6 +275,12 @@ class PerceptionPipeline:
         )
 
         depth_std = float(np.std(depth_result.depth_map)) if depth_result.depth_map.size else 0.0
+        if not depth_result.is_metric and depth_result.depth_map.size:
+            # Unitless depth: use the spread of the min-max normalised map, expressed on
+            # the same 0..max_depth scale the confidence formula expects (display only).
+            d = depth_result.depth_map
+            span = float(d.max() - d.min())
+            depth_std = float(np.std((d - d.min()) / span)) * self.max_depth_m if span > 1e-9 else 0.0
         depth_conf = self.confidence_estimator.estimate_depth_confidence(
             depth_map_std=depth_std,
             weather_modifier=self.fusion_engine.get_weather_modifier(weather_result.label, "camera_depth"),
@@ -287,6 +325,26 @@ def _progress_bar_html(label: str, value_0_1: float, right_text: str = "") -> st
         f'<div class="bar-track"><div class="bar-fill" style="width:{pct:.1f}%"></div></div>'
         f'<span class="bar-value">{right}</span></div>'
     )
+
+
+def depth_status_label(output: PipelineOutput) -> str:
+    """What the depth values on screen mean this frame, in a few words."""
+    kind = output.depth.kind
+    if output.depth.is_metric:
+        calibrated = output.camera is not None and output.camera.calibrated
+        return "metric depth; camera calibrated" if calibrated else "metric depth; camera uncalibrated"
+    return {
+        DEPTH_KIND_RELATIVE: "relative depth (no metric distance)",
+        DEPTH_KIND_HEURISTIC: "heuristic depth fallback (no metric distance)",
+        DEPTH_KIND_NONE: "depth estimation disabled",
+    }.get(kind, f"depth kind '{kind}' (no metric distance)")
+
+
+def display_depth(depth: DepthResult) -> np.ndarray:
+    """Depth map oriented for colour display (larger = farther) whatever its kind.
+    Relative output is inverse depth (near = large), so it is negated; values are
+    only ever min-max normalised for colour, never interpreted as metres."""
+    return -depth.depth_map if depth.kind == DEPTH_KIND_RELATIVE else depth.depth_map
 
 
 def _format_distance(distance_m: Optional[float]) -> str:
@@ -462,7 +520,8 @@ def draw_primary_object_panel(frame: np.ndarray, output: PipelineOutput) -> np.n
     x0, y0 = w - panel_w - 14, 14
 
     if output.risk is None:
-        lines = ["OBJECT STATUS", "N/A - BEV mapping disabled"]
+        reason = "BEV mapping disabled" if output.depth.is_metric else depth_status_label(output)
+        lines = ["OBJECT STATUS", f"N/A - {reason}"]
         panel_h = 20 + 24 * len(lines)
         overlay = frame.copy()
         cv2.rectangle(overlay, (x0, y0), (x0 + panel_w, y0 + panel_h), (18, 22, 26), -1)
@@ -490,9 +549,9 @@ def draw_primary_object_panel(frame: np.ndarray, output: PipelineOutput) -> np.n
 
     obj_risk, det_conf, velocity = primary
     color = RISK_LEVEL_COLORS.get(obj_risk.risk_level, (200, 200, 200))
-    # Distance, speed and TTC all derive from monocular RELATIVE depth rescaled
-    # to an assumed range -- no LiDAR/radar/odometry -- so they are labelled as
-    # uncalibrated estimates (*) rather than presented as measurements.
+    # Distance, speed and TTC derive from monocular metric depth -- no LiDAR,
+    # radar or odometry -- so they are labelled as estimates (*), and the footer
+    # says whether the camera behind them is calibrated.
     rows = [
         ("Distance*", _format_distance(obj_risk.distance_m)),
         ("Rel. Speed*", _format_relative_speed(velocity)),
@@ -520,7 +579,7 @@ def draw_primary_object_panel(frame: np.ndarray, output: PipelineOutput) -> np.n
         cv2.putText(frame, value, (x0 + panel_w - tw - 12, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, val_color, 1, cv2.LINE_AA)
         y += 24
-    cv2.putText(frame, "* uncalibrated monocular-depth estimate", (x0 + 12, y - 4),
+    cv2.putText(frame, f"* estimate: {depth_status_label(output)}", (x0 + 12, y - 4),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.38, (150, 150, 150), 1, cv2.LINE_AA)
     return frame
 
@@ -628,7 +687,7 @@ def render_sensor_status_html(output: PipelineOutput, pipeline_cfg) -> str:
         _row("Camera Detection", conf.get("camera_detection"), True)
         + _row("Depth Estimation", conf.get("camera_depth"), pipeline_cfg.run_depth_estimation)
         + _row("Object Tracking", None, pipeline_cfg.run_tracking)
-        + _row("BEV Mapping", None, pipeline_cfg.run_bev_mapping)
+        + _row("BEV Mapping", None, output.bev is not None)   # needs metric depth
     )
     scene_conf = output.fusion.overall_scene_confidence * 100.0
     return f"""
@@ -688,10 +747,10 @@ def render_sensor_weights_html(output: PipelineOutput) -> str:
 
 
 def render_depth_panel(output: PipelineOutput) -> np.ndarray:
-    """Unchanged from the original implementation."""
+    """Depth colour map (near and far keep the same colours in every depth mode)."""
     from utils import depth_to_colormap
 
-    return depth_to_colormap(output.depth.depth_map)
+    return depth_to_colormap(display_depth(output.depth))
 
 
 def render_bev_panel(output: PipelineOutput) -> np.ndarray:
@@ -751,7 +810,7 @@ def render_object_table_df(output: PipelineOutput):
             "Track ID": d.track_id if d.track_id is not None else "-",
             "Class": d.class_name,
             "Confidence": round(d.confidence, 3),
-            # Uncalibrated estimates from monocular relative depth (no LiDAR/radar).
+            # Estimates from monocular metric depth (no LiDAR/radar); N/A in relative depth mode.
             "Distance (est.)": _format_distance(obj_risk.distance_m) if obj_risk else "N/A",
             "Rel. Speed (est.)": _format_relative_speed(velocity),
             "TTC (est.)": _format_ttc(obj_risk.ttc_seconds) if obj_risk else "N/A",

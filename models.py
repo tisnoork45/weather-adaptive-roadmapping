@@ -115,9 +115,11 @@ class YOLODetector:
         classes_of_interest: Optional[Sequence[int]] = None,
         device_preference: str = "auto",
         allow_download: bool = True,
+        strict: bool = False,
     ) -> None:
         self.weights_path = weights_path
         self.allow_download = allow_download
+        self.strict = strict
         self.confidence_threshold = confidence_threshold
         self.iou_threshold = iou_threshold
         self.input_size = input_size
@@ -126,6 +128,11 @@ class YOLODetector:
         self.model = None
         self._use_fallback = False
         self._load_model()
+        if self._use_fallback and strict:
+            raise RuntimeError(
+                f"YOLO11x could not be loaded from {weights_path}, and strict mode forbids the "
+                "contour-based fallback detector (see the error logged above)."
+            )
 
     def _load_model(self) -> None:
         try:
@@ -218,112 +225,146 @@ class YOLODetector:
 # =============================================================================
 
 
+# What a depth map's values mean. Only DEPTH_KIND_METRIC may be used as metres
+# (object distance, BEV, velocity, TTC); everything else is display-only.
+DEPTH_KIND_METRIC = "metric_m"                 # metric model output, metres
+DEPTH_KIND_RELATIVE = "relative_inverse"       # relative model output: affine-invariant inverse depth, no unit
+DEPTH_KIND_HEURISTIC = "heuristic"             # classical fallback pseudo-depth (non-strict mode only)
+DEPTH_KIND_NONE = "none"                       # depth estimation disabled
+
+DEPTH_MODES = ("relative", "metric")
+
+_DAV2_CONFIGS = {
+    "vits": {"encoder": "vits", "features": 64, "out_channels": [48, 96, 192, 384]},
+    "vitb": {"encoder": "vitb", "features": 128, "out_channels": [96, 192, 384, 768]},
+    "vitl": {"encoder": "vitl", "features": 256, "out_channels": [256, 512, 1024, 1024]},
+}
+
+
 @dataclass
 class DepthResult:
     depth_map: np.ndarray
     inference_time_ms: float = 0.0
     mean_depth: float = 0.0
+    kind: str = "unknown"
+    # False where the depth must not be used (e.g. masked dashboard/bonnet rows); None = all usable.
+    valid_mask: Optional[np.ndarray] = None
+
+    @property
+    def is_metric(self) -> bool:
+        return self.kind == DEPTH_KIND_METRIC
 
     @classmethod
-    def from_map(cls, depth_map: np.ndarray, elapsed_ms: float) -> "DepthResult":
-        return cls(depth_map=depth_map, inference_time_ms=elapsed_ms, mean_depth=float(np.mean(depth_map)))
+    def from_map(cls, depth_map: np.ndarray, elapsed_ms: float, kind: str = "unknown",
+                 valid_mask: Optional[np.ndarray] = None) -> "DepthResult":
+        return cls(depth_map=depth_map, inference_time_ms=elapsed_ms, mean_depth=float(np.mean(depth_map)),
+                   kind=kind, valid_mask=valid_mask)
 
 
 class DepthEstimator:
-    """High-level monocular depth estimator wrapping Depth Anything V2."""
+    """Monocular depth with Depth Anything V2, in one of two explicit modes.
+
+    * ``mode="relative"`` -- the relative checkpoint. Its raw output is
+      affine-invariant inverse depth (near = large, no unit); it is returned
+      unchanged as DEPTH_KIND_RELATIVE and must not be read as metres. (It used
+      to be min/max-normalised into an assumed 0-80 m range; that mapping is
+      linear in inverse depth, so its "metres" were not distances at all.)
+    * ``mode="metric"`` -- a Depth Anything V2 metric checkpoint (sigmoid head
+      x max_depth). Output is depth in metres, DEPTH_KIND_METRIC. Its scale was
+      learned for a training camera (Virtual KITTI 2 for the outdoor model),
+      so it is only trustworthy on a calibrated, similar camera.
+
+    ``strict=True`` raises if the checkpoint cannot be loaded or inference
+    fails; otherwise the classical heuristic is used and tagged
+    DEPTH_KIND_HEURISTIC, which downstream code never treats as metres.
+    ``ignore_bottom_rows_fraction`` marks the bottom of the image (a visible
+    dashboard or bonnet) as invalid in ``valid_mask``.
+    """
 
     def __init__(
         self, weights_path: str = "weights/depth_anything_v2_vits.pth", encoder: str = "vits",
         input_size: int = 518, max_depth_m: float = 80.0, device_preference: str = "auto",
-        normalization_smoothing_alpha: float = 0.3,
+        mode: str = "relative", strict: bool = False, ignore_bottom_rows_fraction: float = 0.0,
     ) -> None:
+        if mode not in DEPTH_MODES:
+            raise ValueError(f"Unknown depth mode {mode!r}; expected one of {DEPTH_MODES}")
+        if encoder not in _DAV2_CONFIGS:
+            raise ValueError(f"Unknown Depth Anything V2 encoder {encoder!r}")
         self.weights_path, self.encoder, self.input_size = weights_path, encoder, input_size
+        self.mode, self.strict = mode, strict
         self.max_depth_m = max_depth_m
+        self.ignore_bottom_rows_fraction = float(ignore_bottom_rows_fraction)
         self.device = get_device(device_preference)
         self.model = None
         self._use_fallback = False
-        # EMA-smoothed (d_min, d_max) normalization bounds -- see _real_infer
-        # for why: Depth Anything V2's raw output is scene-relative, so
-        # recomputing min/max fresh every frame (the original behavior)
-        # rescales the ENTIRE depth map differently frame to frame even when
-        # nothing in the scene actually moved, which shows up downstream as
-        # spurious relative-velocity/TTC noise. Smoothing the bounds over
-        # time removes that artificial jitter while still tracking real
-        # scene changes (just not instantaneously). 1.0 = no smoothing
-        # (identical to the original per-frame behavior).
-        self.normalization_smoothing_alpha = normalization_smoothing_alpha
-        self._ema_d_min: Optional[float] = None
-        self._ema_d_max: Optional[float] = None
         self._load_model()
+        if self._use_fallback and strict:
+            raise RuntimeError(
+                f"Depth Anything V2 ({mode}) could not be loaded from {weights_path}, and strict mode "
+                "forbids the heuristic depth fallback (see the error logged above)."
+            )
 
     def _load_model(self) -> None:
         try:
-            from depth_anything_v2.dpt import DepthAnythingV2  # type: ignore
-
-            model_configs = {
-                "vits": {"encoder": "vits", "features": 64, "out_channels": [48, 96, 192, 384]},
-                "vitb": {"encoder": "vitb", "features": 128, "out_channels": [96, 192, 384, 768]},
-                "vitl": {"encoder": "vitl", "features": 256, "out_channels": [256, 512, 1024, 1024]},
-            }
-            cfg = model_configs.get(self.encoder, model_configs["vits"])
-
             if not Path(self.weights_path).exists():
                 raise FileNotFoundError(
                     f"Depth Anything V2 weights not found at {self.weights_path}. "
                     "Run `python download.py models --only depth` to fetch them."
                 )
-
-            self.model = DepthAnythingV2(**cfg)
-            self.model.load_state_dict(torch.load(self.weights_path, map_location="cpu"))
+            cfg = _DAV2_CONFIGS[self.encoder]
+            if self.mode == "metric":
+                from depth_anything_v2.dpt_metric import MetricDepthAnythingV2  # type: ignore
+                self.model = MetricDepthAnythingV2(**cfg, max_depth=self.max_depth_m)
+            else:
+                from depth_anything_v2.dpt import DepthAnythingV2  # type: ignore
+                self.model = DepthAnythingV2(**cfg)
+            # strict=True so a wrong or partial checkpoint cannot load silently. Relative and
+            # metric checkpoints share the same keys, so the configured mode must match the file.
+            self.model.load_state_dict(torch.load(self.weights_path, map_location="cpu"), strict=True)
             self.model.to(self.device).eval()
-            logger.info("Loaded Depth Anything V2 (%s) from %s", self.encoder, self.weights_path)
+            logger.info("Loaded Depth Anything V2 (%s, %s mode) from %s", self.encoder, self.mode, self.weights_path)
         except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to load Depth Anything V2 (%s). Using classical fallback.", exc)
+            logger.error("Failed to load Depth Anything V2 (%s mode): %s", self.mode, exc)
             self._use_fallback = True
+
+    @property
+    def output_kind(self) -> str:
+        if self._use_fallback or self.model is None:
+            return DEPTH_KIND_HEURISTIC
+        return DEPTH_KIND_METRIC if self.mode == "metric" else DEPTH_KIND_RELATIVE
 
     def infer(self, frame: np.ndarray) -> DepthResult:
         start = time.perf_counter()
-        if self._use_fallback or self.model is None:
+        kind = self.output_kind
+        if kind == DEPTH_KIND_HEURISTIC:
             depth_map = self._fallback_depth(frame)
         else:
             try:
-                depth_map = self._real_infer(frame)
+                depth_map = self.predict_raw(frame)
             except Exception as exc:  # noqa: BLE001
-                logger.error("Depth inference failed (%s); using fallback.", exc)
-                depth_map = self._fallback_depth(frame)
+                if self.strict:
+                    raise
+                logger.error("Depth inference failed (%s); using the heuristic fallback (not metric).", exc)
+                depth_map, kind = self._fallback_depth(frame), DEPTH_KIND_HEURISTIC
         elapsed_ms = (time.perf_counter() - start) * 1000.0
-        return DepthResult.from_map(depth_map, elapsed_ms)
+        return DepthResult.from_map(depth_map, elapsed_ms, kind=kind, valid_mask=self._valid_mask(depth_map.shape))
 
     @torch.no_grad()
-    def _real_infer(self, frame: np.ndarray) -> np.ndarray:
-        raw_depth = np.asarray(self.model.infer_image(frame, self.input_size), dtype=np.float32)
-        d_min, d_max = float(raw_depth.min()), float(raw_depth.max())
-        if d_max - d_min < 1e-6:
-            return np.zeros_like(raw_depth)
+    def predict_raw(self, frame: np.ndarray) -> np.ndarray:
+        """The model's own output at the frame's resolution: metres (metric mode)
+        or relative inverse depth (relative mode). No rescaling of any kind."""
+        return np.asarray(self.model.infer_image(frame, self.input_size), dtype=np.float32)
 
-        # Temporally smooth the normalization bounds (see __init__ docstring
-        # comment) rather than rescaling against this frame's raw min/max in
-        # isolation. First frame has no prior estimate, so it seeds the EMA
-        # with the raw bounds (identical to the original one-frame behavior).
-        alpha = self.normalization_smoothing_alpha
-        if self._ema_d_min is None:
-            self._ema_d_min, self._ema_d_max = d_min, d_max
-        else:
-            self._ema_d_min = alpha * d_min + (1 - alpha) * self._ema_d_min
-            self._ema_d_max = alpha * d_max + (1 - alpha) * self._ema_d_max
-
-        norm_min, norm_max = self._ema_d_min, self._ema_d_max
-        if norm_max - norm_min < 1e-6:
-            norm_min, norm_max = d_min, d_max  # degenerate smoothed range -- fall back to this frame's own
-
-        # This frame's raw values can fall slightly outside the smoothed
-        # bounds (e.g. a genuinely new near/far object just entered frame) --
-        # clip rather than let normalized go negative or past 1.0.
-        normalized = np.clip((raw_depth - norm_min) / (norm_max - norm_min), 0.0, 1.0)
-        return (1.0 - normalized) * self.max_depth_m
+    def _valid_mask(self, shape) -> Optional[np.ndarray]:
+        rows = int(round(self.ignore_bottom_rows_fraction * shape[0]))
+        if rows <= 0:
+            return None
+        mask = np.ones(shape[:2], dtype=bool)
+        mask[shape[0] - rows:] = False
+        return mask
 
     def _fallback_depth(self, frame: np.ndarray) -> np.ndarray:
-        """Vertical-position + local-sharpness heuristic pseudo-depth estimator."""
+        """Vertical-position + local-sharpness heuristic pseudo-depth (display only, never metres)."""
         h, w = frame.shape[:2]
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
         vertical_prior = np.tile(np.linspace(0.0, 1.0, h).reshape(h, 1), (1, w))
@@ -455,8 +496,9 @@ class WeatherClassifier:
         self, weights_path: str = "weights/efficientnet_weather.pth",
         classes: List[str] = None, input_size: int = 224,
         normalize_mean: List[float] = None, normalize_std: List[float] = None,
-        device_preference: str = "auto",
+        device_preference: str = "auto", strict: bool = False,
     ) -> None:
+        self.strict = strict
         self.classes = classes or DEFAULT_WEATHER_CLASSES
         self.input_size = input_size
         self.mean = np.array(normalize_mean or [0.485, 0.456, 0.406], dtype=np.float32)
@@ -466,6 +508,11 @@ class WeatherClassifier:
         self.model: nn.Module = None
         self._use_fallback = False
         self._load_model()
+        if self._use_fallback and strict:
+            raise RuntimeError(
+                f"Weather classifier could not be loaded from {weights_path}, and strict mode forbids "
+                "the colour-heuristic fallback (see the message logged above)."
+            )
 
     def _load_model(self) -> None:
         if not Path(self.weights_path).exists():
@@ -553,6 +600,8 @@ class WeatherClassifier:
             try:
                 label, probs = self._neural_infer(frame)
             except Exception as exc:  # noqa: BLE001
+                if self.strict:
+                    raise
                 logger.error("Weather neural inference failed (%s); using heuristic.", exc)
                 label, probs = self._heuristic_classify(frame)
         elapsed_ms = (time.perf_counter() - start) * 1000.0

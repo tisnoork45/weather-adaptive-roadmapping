@@ -70,6 +70,10 @@ depth_anything_v2_repo/
 data/weather_dataset_*/
 outputs/weather_runs/*/
 
+# Evaluation outputs. KITTI-derived files (images, predictions, metrics) must
+# never be committed: the dataset is licensed CC BY-NC-SA 3.0.
+outputs/experiments/
+
 # Local archives, imported logs and notebook checkpoints
 *.zip
 imported_logs/

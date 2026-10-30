@@ -20,6 +20,8 @@ camera:
   width: 1280
   height: 720
   fps: 30
+  calibrated: false      # the intrinsics below are placeholders, NOT a calibration of
+                         # the recording camera; metric outputs are then labelled uncalibrated
   intrinsics:            # defined for width x height above; scaled automatically
                          # for frames of another size (e.g. a 1024x576 video)
     fx: 1000.0
@@ -44,6 +46,8 @@ pipeline:
   run_weather_classification: true
   run_tracking: true
   run_bev_mapping: true
+  strict: false          # true = a model that fails to load/run raises instead of
+                         # silently using a heuristic fallback (research runs use true)
   target_fps: 15
 
 dashboard:
@@ -61,11 +65,20 @@ detection:
   classes_of_interest: [0, 1, 2, 3, 5, 7, 9, 11]   # person, bicycle, car, motorcycle, bus, truck, traffic light, stop sign
 
 depth_estimation:
+  # "relative": Depth Anything V2 relative model -> unitless inverse depth; distance,
+  #             speed, TTC and risk are shown as N/A (no fake metres).
+  # "metric":   Depth Anything V2 Metric Outdoor (Virtual KITTI 2) -> depth in metres;
+  #             only meaningful with a calibrated camera similar to the training camera.
+  mode: "relative"
   weights_path: "weights/depth_anything_v2_vits.pth"
   download_url: "https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_vits.pth"
+  metric_weights_path: "weights/depth_anything_v2_metric_vkitti_vits.pth"
+  metric_download_url: "https://huggingface.co/depth-anything/Depth-Anything-V2-Metric-VKITTI-Small/resolve/c725b8589bdf6ab04072cab74c0467830db80d6d/depth_anything_v2_metric_vkitti_vits.pth"
+  metric_sha256: "9203e538d35255c90dda4b7fedb47ff33fe725497bcca3b1e53b3a65ee63f0cb"
   encoder: "vits"
   input_size: 518
-  max_depth_m: 80.0
+  max_depth_m: 80.0              # metric head's output range (80 for the outdoor checkpoint)
+  ignore_bottom_rows_fraction: 0.0   # >0 masks a visible dashboard/bonnet from object distances
 
 weather_classification:
   # NOTE: no generic checkpoint is downloaded here. The shipped checkpoint was
@@ -140,3 +153,9 @@ risk:
     fog: 1.60
     snow: 1.50
     night: 1.25
+
+# --- Evaluation datasets (kept outside the repository) ----------------------------------
+
+datasets:
+  # KITTI depth-prediction selected validation set (CC BY-NC-SA 3.0; never commit its data)
+  kitti_depth_selection_root: "/workspace/datasets/kitti/depth_selection/extracted/depth_selection"

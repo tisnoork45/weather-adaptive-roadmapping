@@ -15,6 +15,7 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
+from camera import CameraModel
 from models import Detection
 from utils import get_logger
 
@@ -90,13 +91,15 @@ class BEVMapper:
         y = (v - self.cy) * z / self.fy
         return x, y, z
 
-    def build_point_cloud(self, frame: np.ndarray, depth_map: np.ndarray,
-                           stride: int = 8) -> Tuple[np.ndarray, np.ndarray]:
+    def build_point_cloud(self, frame: np.ndarray, depth_map: np.ndarray, stride: int = 8,
+                           valid_mask: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
         h, w = depth_map.shape[:2]
         us, vs = np.arange(0, w, stride), np.arange(0, h, stride)
         grid_u, grid_v = np.meshgrid(us, vs)
         depths = depth_map[grid_v, grid_u]
         valid = (depths > 0.5) & (depths < self.bev_range_m)
+        if valid_mask is not None:
+            valid &= valid_mask[grid_v, grid_u]
 
         xs = (grid_u[valid] - self.cx) * depths[valid] / self.fx
         ys = (grid_v[valid] - self.cy) * depths[valid] / self.fy
@@ -117,7 +120,8 @@ class BEVMapper:
         return pcd
 
     def _sample_object_depth(self, depth_map: np.ndarray, u: int, v: int,
-                              x1: float, y1: float, x2: float, y2: float, half_size: int = 2) -> float:
+                              x1: float, y1: float, x2: float, y2: float, half_size: int = 2,
+                              valid_mask: Optional[np.ndarray] = None) -> float:
         """Median depth over a small window around (u, v), clipped to both
         the image bounds and the detection box itself.
 
@@ -134,28 +138,36 @@ class BEVMapper:
         silently returning something new for the same case it always
         handled (behind-camera/invalid depth -> caller's existing
         `depth_val <= 0.1` skip is unaffected).
+
+        Pixels outside ``valid_mask`` (e.g. a masked dashboard) are never
+        used; if none remain, 0.0 is returned so the caller skips the object.
         """
         h, w = depth_map.shape[:2]
         wy1 = max(int(y1), v - half_size, 0)
         wy2 = min(int(y2), v + half_size, h - 1)
         wx1 = max(int(x1), u - half_size, 0)
         wx2 = min(int(x2), u + half_size, w - 1)
+        centre_usable = valid_mask is None or bool(valid_mask[v, u])
         if wy2 < wy1 or wx2 < wx1:
-            return float(depth_map[v, u])
+            return float(depth_map[v, u]) if centre_usable else 0.0
         patch = depth_map[wy1:wy2 + 1, wx1:wx2 + 1]
-        valid = patch[patch > 0.1]
+        usable = patch > 0.1
+        if valid_mask is not None:
+            usable &= valid_mask[wy1:wy2 + 1, wx1:wx2 + 1]
+        valid = patch[usable]
         if valid.size == 0:
-            return float(depth_map[v, u])
+            return float(depth_map[v, u]) if centre_usable else 0.0
         return float(np.median(valid))
 
-    def project_objects_to_bev(self, detections: List[Detection], depth_map: np.ndarray) -> List[BEVObject]:
+    def project_objects_to_bev(self, detections: List[Detection], depth_map: np.ndarray,
+                               valid_mask: Optional[np.ndarray] = None) -> List[BEVObject]:
         h, w = depth_map.shape[:2]
         bev_objects: List[BEVObject] = []
         for det in detections:
             x1, y1, x2, y2 = det.box
             u = int(np.clip((x1 + x2) / 2.0, 0, w - 1))
             v = int(np.clip(y2, 0, h - 1))
-            depth_val = self._sample_object_depth(depth_map, u, v, x1, y1, x2, y2)
+            depth_val = self._sample_object_depth(depth_map, u, v, x1, y1, x2, y2, valid_mask=valid_mask)
             if depth_val <= 0.1:
                 continue
             x_m, _, z_m = self.pixel_to_ground_point(u, v, depth_val)
@@ -192,13 +204,28 @@ class BEVMapper:
         cv2.rectangle(canvas, (ego_x - 8, ego_y - 14), (ego_x + 8, ego_y), (0, 255, 0), -1)
         return canvas
 
-    def build_bev(self, frame: np.ndarray, depth_map: np.ndarray, detections: List[Detection]) -> BEVResult:
+    def use_camera(self, camera: CameraModel) -> None:
+        """Use this frame's own intrinsics (must match the depth-map size)."""
+        self.fx, self.fy, self.cx, self.cy = camera.fx, camera.fy, camera.cx, camera.cy
+        self._active_size = None  # a later call without a camera re-applies the reference scaling
+
+    def build_bev(self, frame: np.ndarray, depth_map: np.ndarray, detections: List[Detection],
+                  camera: Optional[CameraModel] = None, valid_mask: Optional[np.ndarray] = None) -> BEVResult:
+        """``depth_map`` must be metric depth in metres. ``camera``, when given,
+        supplies this frame's intrinsics; otherwise the reference intrinsics are
+        scaled to the depth-map size as before."""
         start = time.perf_counter()
         # All projections below work in depth-map pixel coordinates.
-        self._use_frame_size(depth_map.shape[1], depth_map.shape[0])
-        points, colors = self.build_point_cloud(frame, depth_map, stride=10)
+        h, w = depth_map.shape[:2]
+        if camera is not None:
+            if (camera.width, camera.height) != (w, h):
+                raise ValueError(f"Camera is {camera.width}x{camera.height} but the depth map is {w}x{h}")
+            self.use_camera(camera)
+        else:
+            self._use_frame_size(w, h)
+        points, colors = self.build_point_cloud(frame, depth_map, stride=10, valid_mask=valid_mask)
         pcd = self.to_open3d_point_cloud(points, colors)
-        bev_objects = self.project_objects_to_bev(detections, depth_map)
+        bev_objects = self.project_objects_to_bev(detections, depth_map, valid_mask=valid_mask)
 
         bev_image = self.render_bev_image(points, bev_objects)
         elapsed_ms = (time.perf_counter() - start) * 1000.0

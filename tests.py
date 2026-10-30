@@ -73,14 +73,14 @@ def test_detection_result_helpers(detector: YOLODetector) -> None:
 def test_depth_real_inference_runs_on_requested_cpu_device() -> None:
     """Regression: depth_anything_v2/dpt.py used to send its input to CUDA
     whenever CUDA existed, even with the model on CPU, so every frame failed
-    and silently fell back. Call _real_infer directly so a failure surfaces
-    instead of being swallowed by infer()'s fallback."""
-    from models import DepthEstimator
+    and silently fell back. strict=True makes such a failure raise instead of
+    being swallowed by infer()'s fallback."""
+    from models import DEPTH_KIND_RELATIVE, DepthEstimator
 
-    estimator = DepthEstimator(device_preference="cpu", input_size=154)
-    assert not estimator._use_fallback
-    depth = estimator._real_infer(generate_synthetic_frame(width=640, height=480, seed=3))
-    assert depth.shape == (480, 640)
+    estimator = DepthEstimator(device_preference="cpu", input_size=154, strict=True)
+    result = estimator.infer(generate_synthetic_frame(width=640, height=480, seed=3))
+    assert result.kind == DEPTH_KIND_RELATIVE
+    assert result.depth_map.shape == (480, 640)
 
 
 def test_detection_center_and_dims() -> None:

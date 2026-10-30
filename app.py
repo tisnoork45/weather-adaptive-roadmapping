@@ -125,6 +125,8 @@ def main() -> None:
         st.checkbox("Weather Classification", value=cfg.pipeline.run_weather_classification, disabled=True)
         st.checkbox("Object Tracking", value=cfg.pipeline.run_tracking, disabled=True)
         st.checkbox("BEV Mapping", value=cfg.pipeline.run_bev_mapping, disabled=True)
+        # Relative depth has no unit: distance/speed/TTC/risk then show N/A.
+        st.caption(f"Depth mode: {pipeline.depth_mode} (set in config.yaml)")
         st.markdown("---")
         st.caption("Weather Adaptive Road Mapping for Autonomous Vehicles — Capstone Project")
 

@@ -29,8 +29,15 @@ weather-adaptive-road-mapping/
 ├── fusion.py                  # Dynamic confidence estimation + weather-adaptive sensor fusion
 ├── mapping.py                  # Open3D point cloud + bird's-eye-view rasterization
 ├── pipeline.py                  # Orchestrates all modules per frame + Streamlit render helpers
+├── camera.py                    # Per-frame pinhole camera model (calibrated or placeholder)
+│
+├── kitti_depth.py           # KITTI depth-selection reader (images, LiDAR ground truth, intrinsics)
+├── depth_metrics.py          # Depth metrics: official KITTI devkit protocol + standard protocol
+├── depth_methods.py           # Depth-to-metres methods compared in the KITTI evaluation
+├── evaluate_kitti_depth.py     # Reproducible KITTI depth evaluation (all 1,000 validation frames)
 │
 ├── tests.py                # Full pytest suite (detection, fusion, tracking, pipeline)
+├── tests_depth.py          # Depth units, masks, calibration, KITTI loader, metric correctness
 │
 ├── weights/                # Downloaded model checkpoints (gitignored)
 ├── data/                    # Datasets (gitignored — see Dataset section)
@@ -79,6 +86,8 @@ Camera / Video / CARLA
 
 Every model wrapper in `models.py` follows the same pattern: try to load the real pretrained checkpoint; if unavailable (no internet, weights not yet downloaded, license not yet accepted), fall back to a deterministic classical-CV / heuristic implementation, so **the whole pipeline always runs end-to-end**, which is essential for demoing the adaptive-fusion logic without every large checkpoint being present.
 
+**Strict mode** (`pipeline.strict: true` in config.yaml, or `python run.py --strict`) turns every fallback into an error instead, so a research run can never silently use a heuristic. The KITTI evaluation always runs strict. Heuristic depth, when allowed, is tagged as such and never used as metres.
+
 ---
 
 ## Model Status — What's Actually Trained vs. Classical CV
@@ -88,7 +97,7 @@ Being precise about this matters for a capstone report. Here is the honest state
 | Component | Status | Notes |
 |---|---|---|
 | **Object Detection** (YOLO11x) | ✅ Genuine pretrained deep model | Official Ultralytics COCO-pretrained weights, loaded and run as-is. |
-| **Depth Estimation** (Depth Anything V2) | ✅ Genuine pretrained deep model | Official ViT-S weights. Output is **relative** depth linearly rescaled into an assumed max range for BEV visualization — it is *not* metrically calibrated (no LiDAR ground truth used), so treat BEV distances as approximate, not measured. |
+| **Depth Estimation** (Depth Anything V2) | ✅ Genuine pretrained deep models | Two explicit modes (see "Depth Modes"): **relative** (official ViT-S; unitless inverse depth, so distance/speed/TTC/risk show N/A) and **metric** (official Metric Outdoor ViT-S trained on Virtual KITTI 2; metres). Metric mode is evaluated against KITTI LiDAR — a favourable camera domain; on an uncalibrated camera such as road.mp4 its metres remain estimates. |
 | **Weather Classification** (EfficientNet-B0) | ✅ Genuine fine-tuned deep model | Fine-tuned on BDD100K + DAWN (see "Selected weather checkpoint and results" below): held-out test accuracy 0.823, macro-F1 0.833. **Dashcam fog performance is not established.** No generic weather checkpoint is downloaded (see "A note on the previous broken download" below). |
 | **Object Tracking** (ByteTrack) | ✅ Genuine, correctly implemented algorithm | ByteTrack is a Kalman-filter + Hungarian-matching *algorithm*, not a neural network — it was never meant to have separate pretrained weights. Fully functional as shipped, no training required. |
 | **Adaptive Sensor Fusion / Confidence Estimation** | ✅ Genuine, by design rule-based | This is the project's engineered "adaptive" logic layer (weather-conditioned weighting + EMA smoothing) — intentionally hand-tuned/heuristic, not a trained model. This is the correct way to build it, not a shortcut. |
@@ -100,6 +109,45 @@ An earlier version of `download.py` downloaded a checkpoint from a *different* E
 
 ### Lane Detection has been removed
 An earlier revision of this project included a classical Canny-edge + Hough-transform lane detector (`LaneDetector` in `models.py`), plus a never-loaded architectural sketch (`UFLDv2Net`) for a future learned lane model. Both have been fully removed: there is no lane detector, no lane overlay, no lane confidence signal, and no lane-related configuration anywhere in the current pipeline, BEV projection, dashboards, or test suite. If lane detection is reintroduced in the future, it should be designed fresh rather than restored from history.
+
+---
+
+## Depth Modes and KITTI Evaluation
+
+Depth Anything V2 runs in one of two explicit modes (`depth_estimation.mode` in config.yaml, or `python run.py --depth-mode metric`):
+
+| Mode | Checkpoint | Output | Distance / speed / TTC / risk |
+|---|---|---|---|
+| `relative` (**default**) | `weights/depth_anything_v2_vits.pth` | unitless inverse depth (near = large) | **N/A** — no metric values are invented |
+| `metric` | `weights/depth_anything_v2_metric_vkitti_vits.pth` → symlink to `/workspace/checkpoints/…` (SHA-256 `9203e538…`, HF revision `c725b858`) | depth in metres, (0, 80] | computed; labelled *"metric depth; camera uncalibrated"* unless `camera.calibrated: true` |
+
+**Why the old conversion was removed.** The pipeline used to min/max-normalise the relative output and map it linearly onto 0–80 m. The relative output is *inverse* depth, so that mapping is not a distance: on KITTI it gives AbsRel 2.50 and δ<1.25 of 0.02 (table below). A frozen copy is kept in `depth_methods.py` only to measure this.
+
+### KITTI depth evaluation
+
+```bash
+python -B evaluate_kitti_depth.py            # all 1,000 frames of val_selection_cropped, strict models
+pytest tests_depth.py -v                     # units, masks, calibration, loader, metric correctness
+```
+
+Data: KITTI depth-prediction *selected validation* set (1,000 frames, 13 drives, 1216×352, per-frame intrinsics) from `data_depth_selection.zip` (SHA-256 `11028c5f…`), stored outside the repository under `/workspace/datasets/kitti/`. KITTI is CC BY-NC-SA 3.0, so every derived output goes to `outputs/experiments/` (git-ignored).
+
+Standard protocol (GT in (0.001, 80] m), mean over images, 95% CI from a bootstrap over the 13 drives:
+
+| Method | Uses GT? | AbsRel | RMSE (m) | RMSE-log | δ<1.25 | frames |
+|---|---|---|---|---|---|---|
+| Metric ViT-S | no | 0.132 [0.117, 0.147] | 5.26 [4.51, 5.81] | 0.210 | 0.806 [0.737, 0.862] | 1000 |
+| Metric ViT-S × fx/725 | no | 0.134 | 5.30 | 0.213 | 0.803 | 1000 |
+| Old linear 0–80 m conversion | no | 2.502 [2.346, 2.646] | 32.99 | 1.236 | 0.022 | 1000 |
+| Ground plane (K + 1.65 m height) | no | 0.170 [0.127, 0.217] | 7.05 [5.78, 8.29] | 0.200 | 0.825 [0.775, 0.875] | 994 (6 fits rejected) |
+| Relative aligned to GT per frame (**oracle**) | yes | 0.081 [0.077, 0.088] | 3.63 | 0.123 | 0.939 | 1000 |
+
+The official-devkit protocol (no depth cap, devkit SqRel) and range/camera breakdowns are in each run's `summary.md`. Per-frame, the metric model is robust (worst-frame AbsRel 0.36), while the ground-plane baseline matches it on typical frames (median 0.127 vs 0.125) but fails badly when the road ahead is not a flat plane seen from a level camera (20 frames with AbsRel > 0.5, worst 6.6).
+
+**What these numbers do and do not show.**
+- They are *pixel-wise depth* accuracy. They are **not** object-distance accuracy (this subset has no 3D boxes); good depth metrics do not by themselves establish accurate object distances.
+- KITTI is a **favourable camera domain** for the metric model (focal length 707–722 px vs its 725 px training camera; clear daytime). They do **not** show that metric depth generalises to road.mp4 or other cameras.
+- On road.mp4 (uncalibrated phone/dashcam), metric mode places objects at plausible distances (e.g. a car at 30.9 m that the old conversion put at 75.1 m), but the unchanged velocity estimator turns per-frame depth noise into large speed errors (45 % of frames CRITICAL over the first 240 frames). Velocity/TTC are a separate roadmap task, which is why `relative` remains the application default.
 
 ---
 
@@ -197,6 +245,7 @@ python carla_sim.py --weather fog --show --max-frames 500
 ```bash
 python download.py models                 # downloads YOLO11x + Depth Anything V2
 python download.py models --only yolo depth
+python download.py models --only depth_metric   # metric-depth checkpoint, SHA-256 verified
 ```
 
 | Model | Path | Source |
@@ -411,7 +460,7 @@ Work through these in order; each builds on the previous one.
    - Distance/TTC/risk in the detected-objects table and HUD update sensibly as tracked objects move.
 5. **Run the Streamlit dashboard against `road.mp4`:** in the sidebar choose **Input source → Video file** and enter `data/sample_videos/road.mp4` (pre-filled when `camera.source` in `config.yaml` is a file path). Video files use video-timeline timestamps, exactly like `run.py`, so velocity/TTC/risk are correct however slow each frame is. Confirm the adaptive sensor-weight bar chart, FPS, and latency panels update live and stay CPU-reasonable.
 6. **Contrast test (optional but strengthens your report):** if you can find or record a second short clip in a visibly different condition (rain/fog/dusk), run it through the same pipeline and confirm the "Adaptive Sensor Weights" chart visibly shifts lower for `camera_depth` compared to the clear clip, and that the risk-level guide's TTC thresholds visibly tighten — this is the actual thesis claim of the project and worth screenshotting for both conditions side-by-side.
-7. **Document limitations explicitly in your report:** relative (not metric) depth, and the weather classifier's per-class accuracy including the naturally-small fog class — see "Model Status" above for the full honest breakdown.
+7. **Document limitations explicitly in your report:** depth mode (relative depth has no unit; metric depth is validated only on KITTI's favourable camera domain), and the weather classifier's per-class accuracy including the naturally-small fog class — see "Model Status" above for the full honest breakdown.
 
 ---
 
