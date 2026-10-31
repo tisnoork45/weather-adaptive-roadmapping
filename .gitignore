@@ -78,3 +78,19 @@ outputs/experiments/
 *.zip
 imported_logs/
 .ipynb_checkpoints/
+
+# Task 5: KITTI tracking data and KITTI-derived evaluation artefacts (CC BY-NC-SA 3.0) -- never commit.
+# The defaults live outside the repository (/workspace/datasets, /workspace/experiments); these
+# entries guard against a --root/--out/--cache path that points inside it.
+data/kitti/
+image_02/
+label_02/
+oxts/
+velodyne/
+experiments/
+kitti_velocity/
+depth_f16.npy
+frames.json.gz
+per_object.csv.gz
+per_frame.csv.gz
+acceptance_test.json
