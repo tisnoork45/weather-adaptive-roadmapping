@@ -34,7 +34,8 @@ from pipeline import (
     render_status_badge_html,
     render_weather_card_html,
 )
-from utils import VideoStream, generate_synthetic_frame, get_logger, load_config
+from run_logging import STATUS_COMPLETE, STATUS_FAILED, STATUS_INTERRUPTED, RunRecorder
+from utils import VideoStream, configure_logging_from_config, generate_synthetic_frame, get_logger, load_config
 
 logger = get_logger(__name__)
 
@@ -44,6 +45,7 @@ st.set_page_config(page_title="Weather Adaptive Road Mapping", page_icon="🚗",
 @st.cache_resource(show_spinner="Loading perception pipeline (models)...")
 def load_pipeline() -> PerceptionPipeline:
     config = load_config("config.yaml")
+    configure_logging_from_config(config)
     return PerceptionPipeline(config)
 
 
@@ -128,6 +130,10 @@ def main() -> None:
         # Relative depth has no unit: distance/speed/TTC/risk then show N/A.
         st.caption(f"Depth mode: {pipeline.depth_mode} (set in config.yaml)")
         st.markdown("---")
+        record_run = st.checkbox("Record run", value=False,
+                                 help="Write a manifest and per-frame/per-object CSVs to outputs/runs/ "
+                                      "(paths.outputs_dir in config.yaml).")
+        st.markdown("---")
         st.caption("Weather Adaptive Road Mapping for Autonomous Vehicles — Capstone Project")
 
     # --- Stable placeholders, created exactly ONCE, before the loop -------
@@ -168,6 +174,13 @@ def main() -> None:
         return
 
     next_frame_fn, stream, video_fps = get_frame_source(cfg, source_kind, video_path)
+    recorder = None
+    if record_run:
+        source_desc = {SOURCE_SYNTHETIC: "synthetic demo stream", SOURCE_VIDEO: video_path}.get(
+            source_kind, cfg.camera.source)
+        recorder = RunRecorder.start(cfg, pipeline, source=source_desc, fps=video_fps,
+                                     command=["streamlit", "run", "app.py"])
+    run_status, run_error = STATUS_COMPLETE, None
 
     try:
         frame_budget = 1.0 / max(cfg.pipeline.target_fps, 1)
@@ -183,6 +196,8 @@ def main() -> None:
             # which is correct when "now" is the frame.
             timestamp = frame_index / video_fps if video_fps else None
             output = pipeline.process(frame, timestamp=timestamp)
+            if recorder is not None:
+                recorder.record(output, frame_index, timestamp)   # reads the output only; never raises
 
             status_badge_placeholder.markdown(render_status_badge_html(output), unsafe_allow_html=True)
             metric_row_placeholder.markdown(render_metric_row_html(output), unsafe_allow_html=True)
@@ -224,8 +239,16 @@ def main() -> None:
         # subclasses in some versions) -- those are control flow, not crashes.
         if type(exc).__name__ not in ("RerunException", "StopException"):
             logger.exception("Dashboard pipeline loop crashed.")
+            run_status, run_error = STATUS_FAILED, f"dashboard loop error: {exc!r}"
+        else:
+            run_status = STATUS_INTERRUPTED
+        raise
+    except BaseException:
+        run_status = STATUS_INTERRUPTED
         raise
     finally:
+        if recorder is not None:
+            recorder.close(run_status, run_error)
         if stream is not None:
             stream.release()
 

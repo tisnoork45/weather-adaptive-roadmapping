@@ -8,6 +8,8 @@ __pycache__/
 venv/
 .venv/
 env/
+# ...but scripts/env/ holds the environment lock and check scripts, not a virtualenv
+!scripts/env/
 
 # Model weights (large binaries - use download.py instead)
 weights/*.pt
@@ -73,6 +75,10 @@ outputs/weather_runs/*/
 # Evaluation outputs. KITTI-derived files (images, predictions, metrics) must
 # never be committed: the dataset is licensed CC BY-NC-SA 3.0.
 outputs/experiments/
+
+# Recorded runs (run.py --record-run / dashboard "Record run"). They can contain
+# outputs derived from licensed data (e.g. KITTI frames), so they stay local.
+outputs/runs/
 
 # Local archives, imported logs and notebook checkpoints
 *.zip

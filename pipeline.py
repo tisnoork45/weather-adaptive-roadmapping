@@ -22,6 +22,7 @@ import numpy as np
 import cv2
 
 from camera import CameraModel
+from config_schema import ensure_valid
 from fusion import AdaptiveFusionEngine, ConfidenceEstimator, FusionResult, ModuleConfidence
 from mapping import BEVMapper, BEVResult
 from models import (
@@ -35,6 +36,8 @@ from ttc_calculator import compute_ttc_for_objects
 from utils import ConfigDict, MetricsTracker, RISK_LEVEL_COLORS, draw_detections, get_logger
 
 logger = get_logger(__name__)
+
+WEATHER_UNKNOWN = "unknown"   # label when weather classification is disabled
 
 
 @dataclass
@@ -67,6 +70,9 @@ class PerceptionPipeline:
     """
 
     def __init__(self, config: ConfigDict) -> None:
+        # config.yaml is validated when loaded; this re-checks in-memory
+        # overrides (command-line flags, tests) before any model is loaded.
+        ensure_valid(config, source="pipeline configuration")
         self.config = config
         device_pref = config.device.preference
 
@@ -97,15 +103,20 @@ class PerceptionPipeline:
             ignore_bottom_rows_fraction=depth_cfg.get("ignore_bottom_rows_fraction", 0.0),
         )
 
-        self.weather_classifier = WeatherClassifier(
-            weights_path=config.weather_classification.weights_path,
-            classes=config.weather_classification.classes,
-            input_size=config.weather_classification.input_size,
-            normalize_mean=config.weather_classification.normalize_mean,
-            normalize_std=config.weather_classification.normalize_std,
-            device_preference=device_pref,
-            strict=strict,
-        )
+        self.weather_classifier: Optional[WeatherClassifier] = None
+        if config.pipeline.get("run_weather_classification", True):
+            self.weather_classifier = WeatherClassifier(
+                weights_path=config.weather_classification.weights_path,
+                classes=config.weather_classification.classes,
+                input_size=config.weather_classification.input_size,
+                normalize_mean=config.weather_classification.normalize_mean,
+                normalize_std=config.weather_classification.normalize_std,
+                device_preference=device_pref,
+                strict=strict,
+            )
+        else:
+            logger.info("Weather classification disabled (pipeline.run_weather_classification: false): weather "
+                        "is reported as '%s' and weather adjustments are neutral (x1.0).", WEATHER_UNKNOWN)
         self.weather_smoother = WeatherTemporalSmoother(
             time_constant_s=config.weather_classification.get("temporal_smoothing_s", 1.0),
         )
@@ -203,13 +214,19 @@ class PerceptionPipeline:
         self._frame_index += 1
         camera = camera if camera is not None else self.camera_for(frame)
 
-        weather_raw = self.weather_classifier.infer(frame)
-        self.metrics.record_stage("weather", weather_raw.inference_time_ms)
-        # Smooth over time (video timeline when given, else wall clock); every
-        # downstream stage uses the smoothed label so weights/thresholds don't flicker.
-        weather_result = self.weather_smoother.update(
-            weather_raw, timestamp if timestamp is not None else time.perf_counter(),
-        )
+        if self.weather_classifier is not None:
+            weather_raw = self.weather_classifier.infer(frame)
+            self.metrics.record_stage("weather", weather_raw.inference_time_ms)
+            # Smooth over time (video timeline when given, else wall clock); every
+            # downstream stage uses the smoothed label so weights/thresholds don't flicker.
+            weather_result = self.weather_smoother.update(
+                weather_raw, timestamp if timestamp is not None else time.perf_counter(),
+            )
+        else:
+            # Disabled in config: no label is guessed. "unknown" has no fusion
+            # modifier or risk multiplier, so both fall back to the neutral 1.0.
+            weather_raw = weather_result = WeatherResult(label=WEATHER_UNKNOWN, confidence=0.0)
+            self.metrics.record_stage("weather", 0.0)
 
         detection_result = self.detector.infer(frame)
         self.metrics.record_stage("detection", detection_result.inference_time_ms)
@@ -658,6 +675,9 @@ def render_weather_card_html(output: PipelineOutput) -> str:
     conf_pct = output.weather.confidence * 100.0
     probs = sorted(output.weather.probabilities.items(), key=lambda kv: kv[1], reverse=True)
     bars = "".join(_progress_bar_html(cls.upper(), p, f"{p * 100:.0f}%") for cls, p in probs)
+    if not probs:
+        bars = ('<div style="font-size:0.72rem;color:#7a8896;">Classification disabled in config.yaml; '
+                'weather adjustments are neutral (x1.0).</div>')
     return f"""
     <div class="hud-card">
         <div class="hud-card-title">WEATHER</div>

@@ -23,35 +23,46 @@ import yaml
 
 
 class ConfigDict(dict):
-    def __init__(self, data: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(self, data: Optional[Dict[str, Any]] = None, _path: str = "") -> None:
         super().__init__()
+        object.__setattr__(self, "_path", _path)   # dotted location, for error messages only
         for key, value in (data or {}).items():
-            self[key] = self._wrap(value)
+            self[key] = self._wrap(value, f"{_path}.{key}" if _path else str(key))
 
     @staticmethod
-    def _wrap(value: Any) -> Any:
+    def _wrap(value: Any, path: str = "") -> Any:
         if isinstance(value, dict):
-            return ConfigDict(value)
+            return ConfigDict(value, path)
         if isinstance(value, list):
-            return [ConfigDict._wrap(v) for v in value]
+            return [ConfigDict._wrap(v, path) for v in value]
         return value
 
     def __getattr__(self, item: str) -> Any:
         try:
             return self[item]
         except KeyError as exc:
-            raise AttributeError(f"Configuration key '{item}' not found.") from exc
+            path = f"{self.__dict__.get('_path', '')}.{item}".lstrip(".")
+            raise AttributeError(f"Configuration key '{path}' not found.") from exc
 
     def __setattr__(self, key: str, value: Any) -> None:
-        self[key] = self._wrap(value)
+        path = self.__dict__.get("_path", "")
+        self[key] = self._wrap(value, f"{path}.{key}" if path else key)
 
 
-def load_config(path: str = "config.yaml") -> ConfigDict:
+def load_config(path: str = "config.yaml", validate: bool = True) -> ConfigDict:
+    """Load config.yaml. With ``validate`` (the default) the file is checked against
+    config_schema.SCHEMA: problems raise config_schema.ConfigError listing every
+    one with its key path, and unknown keys are logged as warnings."""
     config_path = Path(path)
     if not config_path.exists():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
     with open(config_path, "r", encoding="utf-8") as fh:
         raw = yaml.safe_load(fh) or {}
+    if validate:
+        from config_schema import ensure_valid
+
+        for warning in ensure_valid(raw, source=f"configuration file {config_path}").warnings:
+            logger.warning("%s: %s", config_path, warning)
     return ConfigDict(raw)
 
 
@@ -64,34 +75,90 @@ def ensure_dir(path: str) -> str:
 # Logging
 # =============================================================================
 
+# Importing a module never touches the filesystem or the root logger: logging
+# is set up explicitly by the entry points (run.py, app.py, carla_sim.py,
+# download.py) from config.yaml's `logging:` section. Until then, loggers made
+# by get_logger() print INFO and above to stdout through a console-only
+# fallback, so scripts that never configure logging (e.g. the frozen Task 5
+# evaluation scripts) still show their progress messages.
+
+_LOG_FORMAT = logging.Formatter(fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+                                datefmt="%Y-%m-%d %H:%M:%S")
 _CONFIGURED = False
+_CONFIGURED_SETTINGS: Optional[Tuple] = None
+_ROOT_HANDLERS: List[logging.Handler] = []
+_FALLBACK_LOGGERS: List[logging.Logger] = []
+
+
+class _FallbackConsoleHandler(logging.StreamHandler):
+    """Console output for get_logger() loggers while nothing has configured logging.
+
+    Stays silent as soon as the root logger has any handler (configure_logging(),
+    an application's own logging setup, pytest's log capture), so messages are
+    never printed twice."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setFormatter(_LOG_FORMAT)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if logging.getLogger().handlers:
+            return
+        self.stream = sys.stdout  # resolved per message (pytest/streamlit swap sys.stdout)
+        super().emit(record)
+
+
+_FALLBACK_HANDLER = _FallbackConsoleHandler()
 
 
 def configure_logging(level="INFO", log_to_file=True, log_file="logs/pipeline.log",
                        max_bytes=5 * 1024 * 1024, backup_count=3) -> None:
-    global _CONFIGURED
-    if _CONFIGURED:
+    """Console (stdout) logging, plus a rotating log file when log_to_file is true.
+
+    Safe to call repeatedly (Streamlit reruns): the same settings are a no-op,
+    different settings replace the handlers this function installed earlier."""
+    global _CONFIGURED, _CONFIGURED_SETTINGS
+    settings = (str(level).upper(), bool(log_to_file), str(log_file), int(max_bytes), int(backup_count))
+    if _CONFIGURED and settings == _CONFIGURED_SETTINGS:
         return
     root_logger = logging.getLogger()
-    root_logger.setLevel(getattr(logging, level.upper(), logging.INFO))
-    formatter = logging.Formatter(fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-                                   datefmt="%Y-%m-%d %H:%M:%S")
+    for handler in _ROOT_HANDLERS:
+        root_logger.removeHandler(handler)
+        handler.close()
+    _ROOT_HANDLERS.clear()
+    for lg in _FALLBACK_LOGGERS:
+        lg.removeHandler(_FALLBACK_HANDLER)
+        lg.setLevel(logging.NOTSET)
+    _FALLBACK_LOGGERS.clear()
+
+    root_logger.setLevel(getattr(logging, settings[0], logging.INFO))
     stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setFormatter(formatter)
-    root_logger.addHandler(stream_handler)
+    stream_handler.setFormatter(_LOG_FORMAT)
+    _ROOT_HANDLERS.append(stream_handler)
     if log_to_file:
         log_dir = os.path.dirname(log_file) or "."
         os.makedirs(log_dir, exist_ok=True)
         file_handler = RotatingFileHandler(log_file, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8")
-        file_handler.setFormatter(formatter)
-        root_logger.addHandler(file_handler)
-    _CONFIGURED = True
+        file_handler.setFormatter(_LOG_FORMAT)
+        _ROOT_HANDLERS.append(file_handler)
+    for handler in _ROOT_HANDLERS:
+        root_logger.addHandler(handler)
+    _CONFIGURED, _CONFIGURED_SETTINGS = True, settings
+
+
+def configure_logging_from_config(config: Optional[ConfigDict]) -> None:
+    """configure_logging() with config.yaml's `logging:` section (defaults for missing keys)."""
+    section = dict(config.get("logging") or {}) if config is not None else {}
+    configure_logging(**section)
 
 
 def get_logger(name: Optional[str] = None) -> logging.Logger:
-    if not _CONFIGURED:
-        configure_logging()
-    return logging.getLogger(name if name else "weather_adaptive_mapping")
+    lg = logging.getLogger(name if name else "weather_adaptive_mapping")
+    if not _CONFIGURED and lg not in _FALLBACK_LOGGERS:
+        lg.addHandler(_FALLBACK_HANDLER)
+        lg.setLevel(logging.INFO)
+        _FALLBACK_LOGGERS.append(lg)
+    return lg
 
 
 logger = get_logger(__name__)

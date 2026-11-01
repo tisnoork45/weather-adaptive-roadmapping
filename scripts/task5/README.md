@@ -17,7 +17,13 @@ PYTHONPATH=. python -B scripts/task5/calibrate_stage2.py 2 <out.json> 2.59
 PYTHONPATH=. python -B scripts/task5/acceptance_stage2.py <evaluation run dir>
 ```
 
-The originals were run from a scratch copy of the repository, because importing `utils` writes to `logs/pipeline.log` in the working directory.
+The originals were run from a scratch copy of the repository, because at the time importing `utils` wrote to `logs/pipeline.log` in the working directory.
+
+**Logging since T6.1.** Importing `utils`, or any other project module, no longer creates `logs/` or `logs/pipeline.log`. Only the application entry points (`run.py`, `app.py`, `carla_sim.py`, `download.py`) configure file logging, from the `logging:` section of `config.yaml`.
+
+The frozen Task 5 evaluation scripts (`evaluate_kitti_velocity.py`, `evaluate_kitti_egomotion.py`) and these reproduction scripts never configure logging themselves. They still print their INFO progress messages to the console, in the same format as before, but they no longer create `logs/pipeline.log`. To keep a log file, redirect the console output, e.g. `... 2>&1 | tee run.log`.
+
+The frozen scripts were not modified; only the shared logging set-up in `utils.py` changed. Their console output was checked to be identical, and their cached results were confirmed bit-identical.
 
 **Hard-coded inputs:**
 - `sweep_stage2.py` and `calibrate_stage2.py` read the cache at `/workspace/experiments/kitti_velocity/cache/20261031-190612_1892061-dirty`, built by `evaluate_kitti_velocity.py cache`.

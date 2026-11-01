@@ -5,6 +5,7 @@ Examples:
     python run.py --source data/sample_videos/demo.mp4 --output outputs/videos/out.mp4
     python run.py --synthetic --show --max-frames 300
     python run.py --source road.mp4 --depth-mode metric --strict --max-frames 240 --output out.mp4
+    python run.py --source road.mp4 --max-frames 240 --record-run   # manifest + CSVs in outputs/runs/
 """
 
 from __future__ import annotations
@@ -16,9 +17,10 @@ from pathlib import Path
 import cv2
 
 from pipeline import PerceptionPipeline, display_depth, draw_ego_speed_panel, draw_primary_object_panel
+from run_logging import STATUS_COMPLETE, STATUS_FAILED, STATUS_INTERRUPTED, RunRecorder
 from utils import (
     VideoStream, draw_detections, draw_hud, draw_risk_level_guide, draw_sensor_status_panel,
-    generate_synthetic_frame, get_logger, load_config, overlay_depth_map,
+    configure_logging_from_config, generate_synthetic_frame, get_logger, load_config, overlay_depth_map,
 )
 
 logger = get_logger(__name__)
@@ -37,6 +39,9 @@ def parse_args() -> argparse.Namespace:
                          help="Override config.yaml's depth_estimation.mode for this run.")
     parser.add_argument("--strict", action="store_true",
                          help="Fail instead of falling back to heuristic models (overrides config.yaml).")
+    parser.add_argument("--record-run", action="store_true",
+                         help="Record a manifest and per-frame/per-object CSVs to "
+                              "<paths.outputs_dir>/runs/<run_id>/ (off by default).")
     return parser.parse_args()
 
 
@@ -54,17 +59,22 @@ def resolve_source(args, cfg):
 def main() -> None:
     args = parse_args()
     cfg = load_config("config.yaml")
+    configure_logging_from_config(cfg)
     # Command-line overrides apply to this run only; config.yaml is not modified.
+    overrides = {}
     if args.depth_mode is not None:
         cfg.depth_estimation["mode"] = args.depth_mode
+        overrides["depth_estimation.mode"] = args.depth_mode
     if args.strict:
         cfg.pipeline["strict"] = True
+        overrides["pipeline.strict"] = True
 
     logger.info("Building perception pipeline...")
     pipeline = PerceptionPipeline(cfg)
 
     source = resolve_source(args, cfg)
-    stream, writer = None, None
+    stream, writer, recorder = None, None, None
+    run_status, run_error = STATUS_COMPLETE, None
     frame_index, synthetic_seed = 0, 0
 
     # A prerecorded video file (source is a path string) has its own
@@ -93,6 +103,10 @@ def main() -> None:
                 video_fps = reported_fps if reported_fps and reported_fps > 1e-3 else (cfg.camera.fps or 30.0)
                 logger.info("Prerecorded video source; using video-timeline timestamps at %.3f fps.", video_fps)
 
+        if args.record_run:
+            recorder = RunRecorder.start(cfg, pipeline, source="synthetic demo stream" if source is None else source,
+                                         fps=video_fps, cli_overrides=overrides)
+
         while True:
             if source is None:
                 synthetic_seed += 1
@@ -119,6 +133,9 @@ def main() -> None:
                 timestamp = time.perf_counter()
 
             output = pipeline.process(frame, timestamp=timestamp)
+            if recorder is not None:
+                # Reads the finished output only; never raises (a failure just stops recording).
+                recorder.record(output, frame_index - 1, timestamp)
 
             annotated = frame.copy()
             dets = output.detections
@@ -179,13 +196,17 @@ def main() -> None:
                 break
     except KeyboardInterrupt:
         logger.info("Interrupted by user after %d frames.", frame_index)
-    except Exception:
+        run_status = STATUS_INTERRUPTED
+    except Exception as exc:
         # Without this, a crash only reached the console: the log file just
         # stopped mid-run with no explanation (see the last three runs in
         # imported_logs/logs/pipeline.log).
         logger.exception("Pipeline crashed at frame %d.", frame_index)
+        run_status, run_error = STATUS_FAILED, f"pipeline error at frame {frame_index}: {exc!r}"
         raise
     finally:
+        if recorder is not None:
+            recorder.close(run_status, run_error)
         if stream is not None:
             stream.release()
         if writer is not None:

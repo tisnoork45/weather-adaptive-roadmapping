@@ -1,62 +1,84 @@
 # Weather Adaptive Road Mapping for Autonomous Vehicles
 
-A weather-adaptive multi-sensor perception system for autonomous vehicles, in pure Python. Combines object detection, monocular depth estimation, weather classification, dynamic confidence estimation, adaptive sensor fusion, multi-object tracking, relative-velocity/time-to-collision risk assessment, and bird's-eye-view (BEV) mapping into one real-time pipeline with a live Streamlit dashboard.
+A weather-adaptive perception system for autonomous vehicles, in pure Python, built on a **single forward-facing monocular camera**. Its stages:
+- object detection;
+- monocular depth estimation;
+- weather classification;
+- dynamic confidence estimation;
+- weather-adaptive weighting of the camera modules;
+- multi-object tracking;
+- bird's-eye-view (BEV) mapping;
+- relative-velocity, time-to-collision (TTC) and risk assessment.
 
-> **Final Year Engineering Capstone Project** — no ROS, no Docker, runs entirely inside VS Code.
+They run as one real-time pipeline, with a live Streamlit dashboard.
 
-This is the **consolidated, low-file-count edition** of the project: the same full functionality as a typical multi-package implementation, but organized into a handful of readable files grouped by concern instead of one class per file.
+> **Final Year Engineering Capstone Project.** No ROS. It runs from a plain Python environment, or in VS Code. The reference results were produced in an NVIDIA NGC PyTorch container; see [ENVIRONMENT.md](ENVIRONMENT.md).
+
+**Scope: what this system is and is not.**
+- **Sensors.** The only sensor is one forward-facing camera. LiDAR, radar and IMU are **not** used, and there is no rear or side awareness.
+- **"Fusion."** "Adaptive sensor fusion" here means weather-dependent weighting of two camera-derived modules (detection and depth). Those weights and the scene confidence are shown in the UI; they do not feed the velocity, TTC or risk computation.
+- **Distances and speeds.** These need metric depth, and they are **uncalibrated monocular estimates** unless `camera.calibrated: true` holds for a real calibration.
+- **Default mode.** The application default is relative depth, which has no unit, so it shows no distances.
 
 ---
 
 ## Repository Structure
 
+The repository has a flat layout: one module per concern, all in the root. Core runtime files:
+
 ```
-weather-adaptive-road-mapping/
-├── README.md
-├── requirements.txt
-├── setup.py
-├── .gitignore
-├── config.yaml            # ALL configuration in one file (camera, models, fusion, dashboard)
+weather-adaptive-roadmapping/
+├── README.md, ENVIRONMENT.md      # this file; environments (standard vs NGC reference) and the lock file
+├── requirements.txt               # supported version ranges (what the software needs)
+├── requirements-lock.txt          # exact versions of the reference environment (generated)
+├── setup.py                       # pip install -e . (installs every module listed in PY_MODULES)
+├── config.yaml                    # ALL configuration in one file (validated on load, see "Configuration")
 │
-├── run.py                 # Headless / OpenCV-window entry point
-├── app.py                 # Streamlit real-time dashboard
-├── download.py            # Downloads model weights + sets up datasets (nuScenes/STF/CARLA)
-├── carla_sim.py           # CARLA simulator bridge (spawn vehicle, cycle weather presets)
+├── run.py                         # headless / OpenCV-window entry point (--record-run for structured logs)
+├── app.py                         # Streamlit dashboard
+├── carla_sim.py                   # CARLA simulator bridge (not tested in the reference environment)
+├── download.py                    # model weights + dataset setup helpers
 │
-├── utils.py                # Config loading, logging, metrics, visualization, video IO, device selection
-├── models.py                # YOLO11x detector, Depth Anything V2, EfficientNet weather classifier + trainer
-├── tracking.py               # Self-contained ByteTrack (Kalman filter + two-stage Hungarian matching)
-├── fusion.py                  # Dynamic confidence estimation + weather-adaptive sensor fusion
-├── mapping.py                  # Open3D point cloud + bird's-eye-view rasterization
-├── pipeline.py                  # Orchestrates all modules per frame + Streamlit render helpers
-├── camera.py                    # Per-frame pinhole camera model (calibrated or placeholder)
+├── pipeline.py                    # PerceptionPipeline: orchestrates every stage per frame + dashboard render helpers
+├── models.py                      # YOLO11x detector, Depth Anything V2 (relative/metric), EfficientNet-B0 weather
+│                                  #   classifier + its trainer; heuristic fallbacks unless strict
+├── tracking.py                    # ByteTrack (Kalman filter + two-stage Hungarian matching)
+├── fusion.py                      # confidence estimation + weather-adaptive module weights (display only)
+├── mapping.py                     # BEV projection (metric depth only) + optional Open3D point cloud
+├── camera.py                      # pinhole camera model (calibrated, or placeholder intrinsics)
+├── relative_velocity.py           # production relative-velocity estimator ("B0", frozen for Task 5)
+├── ttc_calculator.py              # time-to-collision per object
+├── risk_engine.py                 # weather-adjusted TTC risk levels
+├── utils.py                       # config loading, logging, metrics, drawing, video IO, device selection
+├── config_schema.py               # config.yaml schema and validation (clear errors with key paths)
+├── run_logging.py                 # opt-in run recorder: manifest.json + frames.csv + objects.csv
+├── depth_anything_v2/             # vendored Depth Anything V2 model code (used at run time)
 │
-├── kitti_depth.py           # KITTI depth-selection reader (images, LiDAR ground truth, intrinsics)
-├── depth_metrics.py          # Depth metrics: official KITTI devkit protocol + standard protocol
-├── depth_methods.py           # Depth-to-metres methods compared in the KITTI evaluation
-├── evaluate_kitti_depth.py     # Reproducible KITTI depth evaluation (all 1,000 validation frames)
+├── prepare_weather_dataset.py     # BDD100K -> weather dataset (see "Training the Weather Classifier")
+├── merge_dawn_weather.py          # adds DAWN fog/rain/snow with de-duplication
 │
-├── tests.py                # Full pytest suite (detection, fusion, tracking, pipeline)
-├── tests_depth.py          # Depth units, masks, calibration, KITTI loader, metric correctness
-│
-├── weights/                # Downloaded model checkpoints (gitignored)
-├── data/                    # Datasets (gitignored — see Dataset section)
-├── logs/                     # Rotating log files
-└── outputs/                   # Saved videos / frames / BEV point clouds
+├── scripts/env/                   # generate_lock.py, check_env.py (no installs)
+├── weights/                       # model checkpoints (git-ignored)
+├── data/                          # datasets (git-ignored)
+├── logs/                          # rotating log file, written by the entry points only
+└── outputs/                       # videos, frames, weather runs; outputs/runs/ and outputs/experiments/ git-ignored
 ```
 
-**13 Python files total** (down from a one-class-per-file layout), each still fully typed, documented, and under ~500 lines, with the same clean separation of concerns:
+The offline evaluation files run outside the live pipeline. All KITTI data and derived outputs stay outside Git (CC BY-NC-SA 3.0).
 
-| File | Responsibility |
+| Files | Purpose |
 |---|---|
-| `utils.py` | Cross-cutting infrastructure: config, logging, metrics, drawing, video IO, device selection |
-| `models.py` | All three perception *models* (detection, depth, weather) — each with a real network + graceful fallback |
-| `tracking.py` | The tracking *algorithm* — kept separate because ByteTrack is a self-contained, non-trivial component |
-| `fusion.py` | The *adaptive* logic that makes this project "weather-adaptive" — confidence scoring + dynamic weighting |
-| `mapping.py` | The *spatial* output — BEV point cloud + top-down map |
-| `pipeline.py` | *Orchestration* — wires every module together per frame, plus dashboard rendering |
+| `kitti_depth.py`, `depth_metrics.py`, `depth_methods.py`, `evaluate_kitti_depth.py`, `tests_depth.py` | KITTI depth evaluation (see "Depth Modes and KITTI Evaluation") |
+| `kitti_tracking.py`, `kitti_velocity_gt.py`, `velocity_eval.py`, `velocity_b0.py`, `evaluate_kitti_velocity.py`, `tests_kitti_tracking.py`, `task5_evaluation_protocol.md` | Task 5: KITTI tracking velocity evaluation of the production estimator. `velocity_b0.py` is a byte-identical frozen copy of `relative_velocity.py`. |
+| `velocity_experimental.py`, `tests_velocity_experimental.py`, `scripts/task5/`, `task5_stage2_results.md` | Task 5 Stage 2: the experimental KS velocity estimator. Offline only; **not integrated** into the live pipeline. |
+| `ego_motion.py`, `evaluate_kitti_egomotion.py`, `tests_ego_motion.py`, `task5_stage3_ego_motion_results.md` | Task 5 Stage 3: experimental monocular ego-motion. Stopped; **not integrated**. |
+| `tests.py`, `tests_foundation.py` | Pipeline tests; configuration, logging, recorder, packaging and lock tests |
+| `research_audit.md` | Earlier research audit |
 
----
+**Kept, pending a separate clean-up decision (not used by the software):**
+- the `*.bak` / `*.before_*` backup copies, `models_backup_before_weather.py`, `fix_run_py.py` and `test_risk_runtime.py`;
+- `Depth-Anything-V2/`, the upstream repository clone (the pipeline uses the vendored `depth_anything_v2/`);
+- `risk_delivery/`, `bdd_files.csv`, `test_depth_frame.jpg` and `streamlit_run.log`.
 
 ## Architecture / Pipeline
 
@@ -100,9 +122,12 @@ Being precise about this matters for a capstone report. Here is the honest state
 | **Depth Estimation** (Depth Anything V2) | ✅ Genuine pretrained deep models | Two explicit modes (see "Depth Modes"): **relative** (official ViT-S; unitless inverse depth, so distance/speed/TTC/risk show N/A) and **metric** (official Metric Outdoor ViT-S trained on Virtual KITTI 2; metres). Metric mode is evaluated against KITTI LiDAR — a favourable camera domain; on an uncalibrated camera such as road.mp4 its metres remain estimates. |
 | **Weather Classification** (EfficientNet-B0) | ✅ Genuine fine-tuned deep model | Fine-tuned on BDD100K + DAWN (see "Selected weather checkpoint and results" below): held-out test accuracy 0.823, macro-F1 0.833. **Dashcam fog performance is not established.** No generic weather checkpoint is downloaded (see "A note on the previous broken download" below). |
 | **Object Tracking** (ByteTrack) | ✅ Genuine, correctly implemented algorithm | ByteTrack is a Kalman-filter + Hungarian-matching *algorithm*, not a neural network — it was never meant to have separate pretrained weights. Fully functional as shipped, no training required. |
-| **Adaptive Sensor Fusion / Confidence Estimation** | ✅ Genuine, by design rule-based | This is the project's engineered "adaptive" logic layer (weather-conditioned weighting + EMA smoothing) — intentionally hand-tuned/heuristic, not a trained model. This is the correct way to build it, not a shortcut. |
-| **BEV Mapping** (Open3D) | ✅ Genuine geometric computation | Deterministic pinhole back-projection, not ML. |
-| **Relative Velocity / TTC / Risk** | ✅ Genuine geometric + rule-based computation | Finite-difference velocity from BEV track history → time-to-collision → weather-multiplied risk thresholds (`relative_velocity.py`, `ttc_calculator.py`, `risk_engine.py`). |
+| **Adaptive Fusion / Confidence Estimation** | ⚠️ Rule-based, **display only** | Weather-conditioned weighting (with EMA smoothing) of two **camera-derived** modules: detection and depth. Hand-tuned rules, not a trained model. The weights and the scene confidence appear in the UI. They do **not** feed BEV, velocity, TTC or risk. Risk is weather-adjusted separately, through `risk.weather_multipliers`. |
+| **BEV Mapping** | ✅ Geometric computation, **metric depth only** | Deterministic pinhole back-projection, not ML. Disabled in relative-depth mode. With placeholder intrinsics (`camera.calibrated: false`) positions are approximate. |
+| **Relative Velocity / TTC / Risk** | ⚠️ Implemented; **large errors** | Finite-difference velocity from BEV track history, then time-to-collision, then weather-multiplied risk thresholds (`relative_velocity.py`, `ttc_calculator.py`, `risk_engine.py`). Needs metric depth. <ul><li>**KITTI test split** (Task 5): closing-speed MAE 3.87 m/s.</li><li>**road.mp4:** depth noise produces many false CRITICAL frames.</li></ul> An experimental estimator (KS) did much better offline (`task5_stage2_results.md`) but is **not integrated**. |
+| **Multi-sensor input (LiDAR / radar / IMU)** | ❌ Not implemented | Camera only. `download.py` still has dataset set-up helpers for nuScenes and Seeing Through Fog, but no code reads their LiDAR or radar data. |
+| **Ego-motion, rear/side awareness** | ❌ Not implemented | Forward camera only. Monocular ego-motion was tried offline and stopped (`task5_stage3_ego_motion_results.md`). Relative velocities are therefore relative to the moving ego vehicle. |
+| **CARLA bridge** (`carla_sim.py`) | ⚠️ Present, untested here | The `carla` package and server are not installed in the reference environment. |
 
 ### A note on the previous broken weather-classifier download
 An earlier version of `download.py` downloaded a checkpoint from a *different* EfficientNet-B0 implementation (lukemelas/EfficientNet-PyTorch, key names like `_conv_stem`, `_fc`) into this project's *torchvision*-based model (key names like `features.0`, `classifier.1`). Since **zero** keys overlapped between the two naming conventions, `load_state_dict(strict=False)` silently loaded nothing — the "pretrained" classifier was actually running on random initialization while appearing to load successfully. This has been fixed: `download.py` no longer downloads a generic checkpoint at all (torchvision's own correctly-matched ImageNet weights are fetched automatically inside training instead), and `WeatherClassifier` now refuses to load any checkpoint that isn't in this project's own verified format, falling back to the heuristic classifier instead of silently running on garbage weights.
@@ -153,18 +178,18 @@ The official-devkit protocol (no depth cap, devkit SqRel) and range/camera break
 
 ## Installation
 
+Two environments are documented in [ENVIRONMENT.md](ENVIRONMENT.md):
+- **Standard installation:** any machine; versions within the `requirements.txt` ranges.
+- **NGC reference environment:** the NVIDIA PyTorch 24.06 container in which every reported result was produced. Exact versions are in `requirements-lock.txt`.
+
+Its PyTorch and torchvision are NVIDIA container builds, which only that image reproduces.
+
 ### Prerequisites
-Python 3.9–3.12, Git, (optional) NVIDIA GPU + CUDA, VS Code with the Python extension.
+- Python 3.9–3.12 and Git.
+- Optional: an NVIDIA GPU with CUDA.
+- Optional: VS Code with the Python extension.
 
-### 1. Clone & create a virtual environment
-
-**Windows (PowerShell):**
-```powershell
-git clone https://github.com/<your-username>/weather-adaptive-road-mapping.git
-cd weather-adaptive-road-mapping
-python -m venv venv
-venv\Scripts\Activate.ps1
-```
+### 1. Clone and create a virtual environment
 
 **Linux / macOS:**
 ```bash
@@ -174,32 +199,52 @@ python3 -m venv venv
 source venv/bin/activate
 ```
 
-### 2. Install dependencies
+**Windows (PowerShell):**
+```powershell
+git clone https://github.com/<your-username>/weather-adaptive-road-mapping.git
+cd weather-adaptive-road-mapping
+python -m venv venv
+venv\Scripts\Activate.ps1
+```
 
-**CPU-only (all platforms):**
+### 2. Install PyTorch, then the dependencies and the project
+
 ```bash
-pip install --upgrade pip
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121   # NVIDIA GPU (CUDA 12.1 build)
+# or: pip install torch torchvision                                                 # CPU, or Apple Silicon (mps)
 pip install -r requirements.txt
+pip install -e .                                                                     # every module + depth_anything_v2/
 ```
 
-**GPU (NVIDIA CUDA 12.1, Windows/Linux)** — install the CUDA build first:
+**In the NGC reference container**, PyTorch is already installed:
+- `pip install -r requirements-lock.txt` should report every package as already satisfied;
+- then run `pip install -e .`.
+
+### 3. Check the environment
+
 ```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-pip install -r requirements.txt
+python scripts/env/check_env.py
 ```
 
-**Apple Silicon (macOS)** — automatically uses the `mps` backend via `utils.get_device()`:
+This reports packages that are missing or outside their `requirements.txt` range, and differences from the reference lock. It installs nothing.
+
+### 4. Model weights
+
+Weights are not in Git; see "Downloading Model Weights".
+
+| Checkpoint | How to get it |
+|---|---|
+| `weights/yolo11x.pt`, `weights/depth_anything_v2_vits.pth` | `python download.py models` |
+| `weights/depth_anything_v2_metric_vkitti_vits.pth` | `python download.py models --only depth_metric` (SHA-256 verified). In this workspace it is a symlink to `/workspace/checkpoints/`. |
+| `weights/efficientnet_weather.pth` | Trained locally; see "Training the Weather Classifier". No generic checkpoint is downloaded. |
+
+Without a checkpoint the pipeline uses a heuristic fallback and says so in the log. `--strict` (or `pipeline.strict: true`) turns that into an error.
+
+### 5. Run the tests
+
 ```bash
-pip install torch torchvision
-pip install -r requirements.txt
+pytest tests.py tests_depth.py tests_kitti_tracking.py tests_velocity_experimental.py tests_ego_motion.py tests_foundation.py -q
 ```
-
-### 3. (Optional) editable install
-```bash
-pip install -e .
-```
-
----
 
 ## Setup (VS Code)
 
@@ -214,11 +259,17 @@ All required folders (`weights/`, `data/`, `logs/`, `outputs/`) already exist wi
 
 ## Dataset
 
-| Source | Role | Access |
+The evaluations use **KITTI**, which is stored outside the repository:
+- the depth selection set for depth;
+- the tracking benchmark for velocity (Task 5).
+
+`download.py` also has set-up helpers for the sources below. **No pipeline or evaluation code reads them yet**, and in particular no LiDAR or radar data is used.
+
+| Source | Status in this project | Access |
 |---|---|---|
-| **nuScenes** | Primary — real multi-camera driving dataset | Free registration at [nuscenes.org](https://www.nuscenes.org) |
-| **Seeing Through Fog (STF)** | Secondary — adverse-weather camera/lidar/radar dataset | Access request required |
-| **CARLA** | Simulator — generates synthetic, weather-controllable footage | Free download, no registration |
+| **nuScenes** | Set-up helper only (camera frames could be fed as video; no dataset reader) | Free registration at [nuscenes.org](https://www.nuscenes.org) |
+| **Seeing Through Fog (STF)** | Set-up helper only (its LiDAR and radar are not used) | Access request required |
+| **CARLA** | Simulator bridge in `carla_sim.py` (untested in the reference environment) | Free download, no registration |
 
 ```bash
 python download.py dataset nuscenes-mini
@@ -407,10 +458,34 @@ streamlit run app.py
 ```bash
 python run.py --synthetic --show                                  # synthetic demo
 python run.py --source 0 --show                                    # webcam
-python run.py --source data/sample_videos/demo.mp4 --output outputs/videos/out.mp4
+python run.py --source road.mp4 --output outputs/videos/out.mp4    # video file (video-timeline timestamps)
 python run.py --synthetic --show --overlay-depth
+python run.py --source road.mp4 --depth-mode metric --strict      # metric depth (enables BEV/velocity/TTC/risk)
+python run.py --source road.mp4 --max-frames 240 --record-run      # also record a structured run (below)
 ```
-Press **`q`** to quit the OpenCV window.
+Press **`q`** to quit the OpenCV window. `--depth-mode` and `--strict` override `config.yaml` for that run only, and the overridden configuration is validated again.
+
+**Logging.** The entry points (`run.py`, `app.py`, `carla_sim.py`, `download.py`) configure logging from the `logging:` section of `config.yaml`: console plus a rotating `logs/pipeline.log`. Importing a module never creates files. Scripts that do not configure logging print INFO messages to the console only.
+
+This includes the frozen Task 5 evaluation scripts (`evaluate_kitti_velocity.py`, `evaluate_kitti_egomotion.py`). They print the same console logs as before but no longer create `logs/pipeline.log`; redirect their output (e.g. `| tee run.log`) to keep a copy. See `scripts/task5/README.md`.
+
+### Recorded runs (structured per-frame logging)
+
+`python run.py ... --record-run` (or the dashboard's **Record run** checkbox) writes `outputs/runs/<run_id>/`, under `paths.outputs_dir`. Recording is **off by default**, and without it nothing is written.
+
+| File | Contents |
+|---|---|
+| `manifest.json` | <ul><li>Run: git commit, branch and changed files; the command; status (`recording`, `complete`, `interrupted` or `failed`).</li><li>Configuration: the resolved config, the config file's SHA-256, command-line overrides.</li><li>Models: checkpoint paths and SHA-256s; whether each model is the network or the heuristic fallback.</li><li>Environment: device and GPU; package versions.</li><li>Pipeline: depth mode, strict mode, camera intrinsics and calibration status, source and fps.</li><li>A note stating that outputs are monocular-camera estimates.</li></ul> |
+| `frames.csv` | One row per frame: weather (smoothed and raw), detection and track counts, depth kind, BEV and valid-velocity counts, overall risk, minimum TTC, scene confidence, per-stage latencies, fps |
+| `objects.csv` | One row per object per frame: box, class, confidence, track ID, BEV x/z, relative velocity, distance, TTC, risk level. The metric columns are empty in relative-depth mode. |
+| `INCOMPLETE` | Present until the run closes as `complete` |
+
+**How recording stays out of the way:**
+- It only reads each finished `PipelineOutput`, after `process()` returns.
+- An I/O error stops recording (status `failed`) but never interrupts inference.
+- The manifest is written atomically.
+- A run whose manifest still says `recording` was killed or crashed and is incomplete.
+- `outputs/runs/` is git-ignored, because recordings of KITTI frames are KITTI-derived.
 
 ---
 
@@ -422,7 +497,7 @@ Camera feed with boxes/track IDs • detected-objects table (with distance/TTC/r
 
 ## Configuration
 
-Everything tunable lives in `config.yaml` — camera, model paths/thresholds, and crucially the **weather → sensor-weight modifier table** that drives the adaptive behavior:
+Everything tunable lives in `config.yaml`: camera, model paths and thresholds, the weather tables, velocity, risk and logging. For example, the **weather → module-weight modifier table** behind the adaptive weighting:
 
 ```yaml
 fusion:
@@ -432,20 +507,63 @@ fusion:
       camera_depth: 0.45
 ```
 
+### Validation
+
+`config.yaml` is checked against `config_schema.py` when loaded. `PerceptionPipeline` checks it again, which catches command-line or in-memory overrides, before any model loads.
+
+**Errors** stop with one message listing every problem and its key path. They cover:
+- missing required keys and wrong types;
+- out-of-range values: probabilities in [0, 1], positive intrinsics and sizes, `velocity.history_length >= 2`;
+- unknown choices: `device.preference`, `depth_estimation.mode`, `depth_estimation.encoder`, `logging.level`;
+- consistency: every weather class must have a `fusion.weather_modifiers` entry and a `risk.weather_multipliers` entry, and `risk.ttc_thresholds_s` must satisfy CRITICAL < WARNING < CAUTION.
+
+For example:
+
+```
+config_schema.ConfigError: Invalid configuration file config.yaml (2 problem(s)):
+  - device.preference: must be one of ['auto', 'cuda', 'mps', 'cpu'], got 'gpu'
+  - risk.ttc_thresholds_s.WARNING: must be > CRITICAL (1.5), got 1.0
+```
+
+**Warnings** cover unknown keys, which are probably typos, and weather entries that no class uses. Validation never changes the configuration. Optional keys fall back to the defaults the code always used.
+
+| Key | Default if omitted | Meaning |
+|---|---|---|
+| `pipeline.strict` | `false` | `true` = a model that fails to load or run raises instead of using a heuristic fallback |
+| `pipeline.run_weather_classification` | `true` | `false` = no classifier is loaded. Weather is reported as `unknown` (confidence 0), so the fusion modifiers and risk multipliers are neutral (×1.0). |
+| `depth_estimation.mode` | `relative` | `metric` enables BEV, velocity, TTC and risk |
+| `camera.calibrated` | `false` | `false` labels metric outputs as uncalibrated estimates |
+| `logging.*` | INFO, console + `logs/pipeline.log` (5 MiB × 3) | Applied by the entry points |
+| `paths.outputs_dir` | `outputs` | Recorded runs go to `<outputs_dir>/runs/` |
+
+**Reserved keys** are accepted and documented but not read by any code yet:
+- `camera.mount_height_m`, `camera.pitch_deg`, `camera.extrinsics`: camera mounting geometry, for later work;
+- `dashboard.refresh_interval_sec`: the dashboard paces itself with `pipeline.target_fps`;
+- `paths.weights_dir`, `paths.data_dir`, `paths.logs_dir`: checkpoint paths are set per model, and the log file by `logging.log_file`.
+
 ---
 
 ## Testing
 
 ```bash
-pytest tests.py -v
+pytest tests.py tests_depth.py tests_kitti_tracking.py tests_velocity_experimental.py tests_ego_motion.py tests_foundation.py -q
 ```
-Runs entirely on CPU with synthetic frames by default; `TEST_DEVICE=cuda pytest tests.py -v` runs the pipeline tests on the GPU instead. Covers: detector interface contracts, confidence/fusion ranges and weather-conditioned ordering (fog ≤ clear), ByteTrack ID persistence + low-confidence recovery, and full end-to-end pipeline execution.
+By default the tests run on CPU with synthetic frames. Set `TEST_DEVICE=cuda` to run the pipeline tests on the GPU.
+
+| Suite | Covers |
+|---|---|
+| `tests.py` | Detector contracts, fusion ranges and weather ordering, ByteTrack, the end-to-end pipeline, velocity/TTC/risk |
+| `tests_depth.py` | Depth units, masks, calibration, the KITTI depth loader |
+| `tests_kitti_tracking.py`, `tests_velocity_experimental.py`, `tests_ego_motion.py` | Task 5 evaluation code |
+| `tests_foundation.py` | <ul><li>Configuration validation.</li><li>No import-time logging side effects.</li><li>The run recorder, including failure and interruption handling.</li><li>`run_weather_classification`.</li><li>`setup.py` module coverage and the environment lock.</li></ul> |
+
+Tests that need the KITTI data skip when it is absent. One test also needs `KITTI_VELOCITY_CACHE` set to a Task 5 cache directory.
 
 ### Final Testing Checklist (using your `road.mp4`)
 
 Work through these in order; each builds on the previous one.
 
-1. **Baseline regression check.** `pytest tests.py -v` → should still show every test passing after any changes (the fallback/synthetic-frame paths are unaffected by the weather-classifier fixes).
+1. **Baseline regression check.** Run the full test command above; every test should pass after any change.
 2. **Confirm weight files present.** `weights/yolo11x.pt` and `weights/depth_anything_v2_vits.pth` should exist; `weights/efficientnet_weather.pth` should exist (the selected checkpoint above). If it's missing, the pipeline logs a warning and uses the colour heuristic, which is not a trained model.
 3. **Train + evaluate the weather classifier** per the walkthrough above; note the printed overall accuracy and per-class confusion matrix for your report.
 4. **Run on `road.mp4` headless, with output saved:**
@@ -458,7 +576,7 @@ Work through these in order; each builds on the previous one.
    - Depth colormap is spatially sensible (nearer objects/road should look visually distinct from the horizon).
    - BEV panel places detected objects at roughly plausible relative positions.
    - Distance/TTC/risk in the detected-objects table and HUD update sensibly as tracked objects move.
-5. **Run the Streamlit dashboard against `road.mp4`:** in the sidebar choose **Input source → Video file** and enter `data/sample_videos/road.mp4` (pre-filled when `camera.source` in `config.yaml` is a file path). Video files use video-timeline timestamps, exactly like `run.py`, so velocity/TTC/risk are correct however slow each frame is. Confirm the adaptive sensor-weight bar chart, FPS, and latency panels update live and stay CPU-reasonable.
+5. **Run the Streamlit dashboard against `road.mp4`.** In the sidebar choose **Input source → Video file** and enter the video's path, e.g. `road.mp4` in the repository root. The field is pre-filled from `camera.source` when that is a file path; otherwise it shows `data/sample_videos/road.mp4`, which does not exist in this checkout. Video files use video-timeline timestamps, exactly like `run.py`, so velocity/TTC/risk are correct however slow each frame is. Confirm the adaptive sensor-weight bar chart, FPS, and latency panels update live and stay CPU-reasonable.
 6. **Contrast test (optional but strengthens your report):** if you can find or record a second short clip in a visibly different condition (rain/fog/dusk), run it through the same pipeline and confirm the "Adaptive Sensor Weights" chart visibly shifts lower for `camera_depth` compared to the clear clip, and that the risk-level guide's TTC thresholds visibly tighten — this is the actual thesis claim of the project and worth screenshotting for both conditions side-by-side.
 7. **Document limitations explicitly in your report:** depth mode (relative depth has no unit; metric depth is validated only on KITTI's favourable camera domain), and the weather classifier's per-class accuracy including the naturally-small fog class — see "Model Status" above for the full honest breakdown.
 
@@ -469,6 +587,8 @@ Work through these in order; each builds on the previous one.
 | Problem | Fix |
 |---|---|
 | Could not open video source | Pass `--synthetic`, or check `config.yaml → camera.source` |
+| `ConfigError` at start-up | The message lists every problem with its key path; fix `config.yaml` (see "Configuration → Validation") |
+| `ModuleNotFoundError` for a project module outside the repository folder | Run `pip install -e .` (or set `PYTHONPATH` to the repository) |
 | Slow FPS on CPU | Lower `detection.input_size`, disable stages in `config.yaml → pipeline`, or install CUDA torch |
 | Import errors for `ultralytics` / `depth_anything_v2` | Re-run `pip install -r requirements.txt`; fallbacks keep the pipeline running meanwhile |
 | Open3D import fails | BEV mapping still works via numpy projection; only `.ply` export is disabled |
@@ -479,7 +599,7 @@ Work through these in order; each builds on the previous one.
 
 ## Future Work
 
-- Radar/LiDAR fusion as a fourth modality in `fusion.py`
+- Additional sensors (radar, LiDAR, IMU). Today `fusion.py` only weighs the two camera-derived modules.
 - Learned (rather than hand-tuned) confidence calibration
 - Temporal BEV occupancy grid accumulation
 - Multi-camera nuScenes ingestion + full-surround BEV

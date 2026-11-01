@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 
 from pipeline import PerceptionPipeline
-from utils import draw_detections, draw_hud, get_logger, load_config
+from utils import configure_logging_from_config, draw_detections, draw_hud, get_logger, load_config
 
 logger = get_logger(__name__)
 
@@ -89,6 +89,7 @@ def main() -> None:
     camera.listen(_on_image)
 
     cfg = load_config("config.yaml")
+    configure_logging_from_config(cfg)
     pipeline = PerceptionPipeline(cfg)
 
     logger.info("Streaming CARLA frames into the perception pipeline. Press 'q' to quit.")

@@ -22,7 +22,7 @@ from typing import Callable, Dict
 import requests
 from tqdm import tqdm
 
-from utils import get_logger, load_config
+from utils import configure_logging_from_config, get_logger, load_config
 
 logger = get_logger(__name__)
 
@@ -295,6 +295,8 @@ def main() -> None:
     dataset_parser.add_argument("--all", action="store_true")
 
     args = parser.parse_args()
+    # Dataset setup does not otherwise need config.yaml; without it, logging uses the defaults.
+    configure_logging_from_config(load_config("config.yaml") if Path("config.yaml").exists() else None)
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
 
     if args.command == "models":
