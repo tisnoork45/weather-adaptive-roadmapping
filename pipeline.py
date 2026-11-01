@@ -13,9 +13,11 @@ it. They are kept in the same file as the pipeline (rather than a separate
 
 from __future__ import annotations
 
+import json
+import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -60,29 +62,74 @@ class PipelineOutput:
     total_latency_ms: float = 0.0
     weather_raw: Optional[WeatherResult] = None   # this frame's unsmoothed prediction
     camera: Optional[CameraModel] = None           # intrinsics used for this frame
+    # Backend per model this frame: "network", "heuristic_fallback" or "disabled"
+    # (see PerceptionPipeline.model_status).
+    model_status: Dict[str, str] = field(default_factory=dict)
 
 
-class PerceptionPipeline:
-    """High-level façade wiring together every perception module.
+# Which implementation produced a stage's output (PipelineOutput.model_status).
+BACKEND_NETWORK = "network"                       # the trained / pretrained model
+BACKEND_FALLBACK = "heuristic_fallback"           # classical heuristic used instead (non-strict mode only)
+BACKEND_DISABLED = "disabled"                     # stage switched off in config.yaml
 
-    Instantiated once (loading all models), then call `.process(frame)` for
-    every incoming camera frame.
-    """
 
-    def __init__(self, config: ConfigDict) -> None:
-        # config.yaml is validated when loaded; this re-checks in-memory
-        # overrides (command-line flags, tests) before any model is loaded.
-        ensure_valid(config, source="pipeline configuration")
-        self.config = config
+def model_config_key(config: ConfigDict) -> str:
+    """Everything that determines which models PerceptionModels.load() builds. Two
+    configurations with the same key can share one PerceptionModels."""
+    pipe = config.pipeline
+    return json.dumps({
+        "device": config.device.preference,
+        "strict": bool(pipe.get("strict", False)),
+        "run_weather_classification": bool(pipe.get("run_weather_classification", True)),
+        "detection": dict(config.detection),
+        "depth_estimation": dict(config.depth_estimation),
+        "weather_classification": dict(config.weather_classification),
+    }, sort_keys=True, default=str)
+
+
+class _SerializedModel:
+    """A model shared by pipelines running in different threads (dashboard sessions).
+
+    ``infer()`` calls are serialised by a lock -- Ultralytics' predictor in
+    particular is not thread-safe -- and every other attribute is passed through.
+    The models hold no per-stream state, so sharing them is safe; each pipeline
+    keeps its own temporal state."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self._lock = threading.Lock()
+
+    def infer(self, frame: np.ndarray):
+        with self._lock:
+            return self._inner.infer(frame)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+@dataclass
+class PerceptionModels:
+    """The pipeline's trained models (detector, depth, weather classifier).
+
+    Loaded once; processing frames never changes them, so one instance can be
+    shared by several PerceptionPipeline instances, each with its own temporal
+    state (see PerceptionPipeline.reset)."""
+
+    detector: Any
+    depth_estimator: Any
+    weather_classifier: Optional[Any]
+    config_key: str
+
+    @classmethod
+    def load(cls, config: ConfigDict) -> "PerceptionModels":
         device_pref = config.device.preference
-
         strict = bool(config.pipeline.get("strict", False))
         depth_cfg = config.depth_estimation
-        self.depth_mode = depth_cfg.get("mode", "relative")
+        depth_mode = depth_cfg.get("mode", "relative")
         logger.info("Initializing perception pipeline modules (depth mode: %s, strict: %s)...",
-                    self.depth_mode, strict)
+                    depth_mode, strict)
 
-        self.detector = YOLODetector(
+        detector = YOLODetector(
             weights_path=config.detection.weights_path,
             confidence_threshold=config.detection.confidence_threshold,
             iou_threshold=config.detection.iou_threshold,
@@ -92,20 +139,20 @@ class PerceptionPipeline:
             strict=strict,
         )
 
-        self.depth_estimator = DepthEstimator(
-            weights_path=depth_cfg.metric_weights_path if self.depth_mode == "metric" else depth_cfg.weights_path,
+        depth_estimator = DepthEstimator(
+            weights_path=depth_cfg.metric_weights_path if depth_mode == "metric" else depth_cfg.weights_path,
             encoder=depth_cfg.encoder,
             input_size=depth_cfg.input_size,
             max_depth_m=depth_cfg.max_depth_m,
             device_preference=device_pref,
-            mode=self.depth_mode,
+            mode=depth_mode,
             strict=strict,
             ignore_bottom_rows_fraction=depth_cfg.get("ignore_bottom_rows_fraction", 0.0),
         )
 
-        self.weather_classifier: Optional[WeatherClassifier] = None
+        weather_classifier: Optional[WeatherClassifier] = None
         if config.pipeline.get("run_weather_classification", True):
-            self.weather_classifier = WeatherClassifier(
+            weather_classifier = WeatherClassifier(
                 weights_path=config.weather_classification.weights_path,
                 classes=config.weather_classification.classes,
                 input_size=config.weather_classification.input_size,
@@ -117,10 +164,77 @@ class PerceptionPipeline:
         else:
             logger.info("Weather classification disabled (pipeline.run_weather_classification: false): weather "
                         "is reported as '%s' and weather adjustments are neutral (x1.0).", WEATHER_UNKNOWN)
+        return cls(detector, depth_estimator, weather_classifier, model_config_key(config))
+
+    def thread_safe(self) -> "PerceptionModels":
+        """The same models, with infer() serialised per model, for sharing across threads."""
+        wrap = lambda m: m if m is None or isinstance(m, _SerializedModel) else _SerializedModel(m)  # noqa: E731
+        return PerceptionModels(wrap(self.detector), wrap(self.depth_estimator), wrap(self.weather_classifier),
+                                self.config_key)
+
+
+def _uses_fallback(model: Any) -> bool:
+    return bool(getattr(model, "_use_fallback", False)) or getattr(model, "model", True) is None
+
+
+class PerceptionPipeline:
+    """High-level façade wiring together every perception module.
+
+    Instantiated once, then call `.process(frame)` for every incoming camera
+    frame. ``models`` lets several pipelines share one set of loaded models
+    (e.g. one pipeline per dashboard session); without it the models are
+    loaded here. All temporal state -- tracks, velocity histories, weather and
+    weight smoothing, metrics -- belongs to this pipeline alone and is cleared
+    by `.reset()`.
+    """
+
+    def __init__(self, config: ConfigDict, models: Optional[PerceptionModels] = None) -> None:
+        # config.yaml is validated when loaded; this re-checks in-memory
+        # overrides (command-line flags, tests) before any model is loaded.
+        ensure_valid(config, source="pipeline configuration")
+        self.config = config
+        self.depth_mode = config.depth_estimation.get("mode", "relative")
+
+        if models is None:
+            models = PerceptionModels.load(config)
+        elif models.config_key != model_config_key(config):
+            raise ValueError("The shared PerceptionModels were built from different model settings "
+                             "than this pipeline's configuration.")
+        else:
+            logger.info("Initializing perception pipeline with shared models (depth mode: %s, strict: %s)...",
+                        self.depth_mode, bool(config.pipeline.get("strict", False)))
+        self.models = models
+        self.detector = models.detector
+        self.depth_estimator = models.depth_estimator
+        self.weather_classifier = models.weather_classifier
+
+        # Stateless parts, fixed by the configuration.
+        self.default_camera = CameraModel.from_config(config.camera)   # for frames without their own intrinsics
+        self.risk_engine = RiskEngine(
+            ttc_thresholds_s=config.risk.ttc_thresholds_s,
+            weather_multipliers=config.risk.weather_multipliers,
+            min_safe_distance_m=config.risk.min_safe_distance_m,
+        )
+        self.pipeline_cfg = config.pipeline
+        self.max_depth_m = config.depth_estimation.max_depth_m
+
+        self._reset_state()
+        logger.info("All perception pipeline modules initialized successfully.")
+
+    def reset(self) -> None:
+        """Forget all temporal state (as if newly constructed) without reloading any model.
+
+        Call it whenever a new stream starts -- another video, camera or source --
+        so tracks, velocities and smoothed weather/weights from the previous
+        stream cannot leak into the new one. Track IDs restart at 1."""
+        self._reset_state()
+
+    def _reset_state(self) -> None:
+        """(Re)create every component that carries state from one frame to the next."""
+        config = self.config
         self.weather_smoother = WeatherTemporalSmoother(
             time_constant_s=config.weather_classification.get("temporal_smoothing_s", 1.0),
         )
-
         self.tracker = ByteTracker(
             track_thresh=config.tracking.track_thresh,
             track_buffer=config.tracking.track_buffer,
@@ -128,51 +242,55 @@ class PerceptionPipeline:
             frame_rate=config.tracking.frame_rate,
             min_box_area=config.tracking.min_box_area,
         )
-
         self.confidence_estimator = ConfidenceEstimator(
             detection_signal_weights=config.confidence_estimation.detection_signal_weights,
             depth_signal_weights=config.confidence_estimation.depth_signal_weights,
             history_length=config.confidence_estimation.history_length,
         )
-
         self.fusion_engine = AdaptiveFusionEngine(
             base_weights=config.fusion.base_weights,
             weather_modifiers=config.fusion.weather_modifiers,
             ema_alpha=config.fusion.ema_alpha,
         )
-
-        self.bev_mapper = BEVMapper(
+        self.bev_mapper = BEVMapper(     # caches the intrinsics of the last frame size
             fx=config.camera.intrinsics.fx, fy=config.camera.intrinsics.fy,
             cx=config.camera.intrinsics.cx, cy=config.camera.intrinsics.cy,
             bev_range_m=config.mapping.bev_range_m, bev_width_m=config.mapping.bev_width_m,
             resolution_px_per_m=config.mapping.bev_resolution_px_per_m,
             reference_width=config.camera.width, reference_height=config.camera.height,
         )
-        # Intrinsics for frames that don't bring their own (video/webcam/synthetic).
-        self.default_camera = CameraModel.from_config(config.camera)
-        self._warned_aspect = False
-
-        # NEW: relative velocity (from BEV object positions) -> TTC -> risk.
-        # Reads the `velocity:`/`risk:` sections already present in
-        # config.yaml. Purely additive -- nothing above this line changed.
         self.velocity_estimator = RelativeVelocityEstimator(
             history_length=config.velocity.history_length,
             max_gap_seconds=config.velocity.max_gap_seconds,
             ema_alpha=config.velocity.ema_alpha,
         )
-        self.risk_engine = RiskEngine(
-            ttc_thresholds_s=config.risk.ttc_thresholds_s,
-            weather_multipliers=config.risk.weather_multipliers,
-            min_safe_distance_m=config.risk.min_safe_distance_m,
-        )
-
-        self.pipeline_cfg = config.pipeline
-        self.max_depth_m = config.depth_estimation.max_depth_m
         self.metrics = MetricsTracker(
             stages=["weather", "detection", "tracking", "depth", "fusion", "bev", "risk"]
         )
         self._frame_index = 0
-        logger.info("All perception pipeline modules initialized successfully.")
+        self._warned_aspect = False
+
+    def model_status(self, depth_result: Optional[DepthResult] = None) -> Dict[str, str]:
+        """Backend of each model: BACKEND_NETWORK, BACKEND_FALLBACK or BACKEND_DISABLED.
+
+        Depth is taken from ``depth_result`` when given, because a non-strict
+        depth model can fall back for a single frame if its inference fails."""
+        if depth_result is not None:
+            depth = {DEPTH_KIND_HEURISTIC: BACKEND_FALLBACK, DEPTH_KIND_NONE: BACKEND_DISABLED}.get(
+                depth_result.kind, BACKEND_NETWORK)
+        elif not self.pipeline_cfg.run_depth_estimation:
+            depth = BACKEND_DISABLED
+        else:
+            depth = BACKEND_FALLBACK if _uses_fallback(self.depth_estimator) else BACKEND_NETWORK
+        if self.weather_classifier is None:
+            weather = BACKEND_DISABLED
+        else:
+            weather = BACKEND_FALLBACK if _uses_fallback(self.weather_classifier) else BACKEND_NETWORK
+        return {
+            "detection": BACKEND_FALLBACK if _uses_fallback(self.detector) else BACKEND_NETWORK,
+            "depth": depth,
+            "weather": weather,
+        }
 
     def camera_for(self, frame: np.ndarray) -> CameraModel:
         """config.yaml's camera scaled to this frame. A calibrated camera must keep its
@@ -279,7 +397,7 @@ class PerceptionPipeline:
             depth=depth_result, fusion=fusion_result, bev=bev_result,
             relative_velocities=relative_velocities, risk=risk_result,
             metrics=self.metrics.summary(), total_latency_ms=total_latency_ms,
-            weather_raw=weather_raw, camera=camera,
+            weather_raw=weather_raw, camera=camera, model_status=self.model_status(depth_result),
         )
 
     def _estimate_confidences(self, weather_result: WeatherResult, detection_result: DetectionResult,

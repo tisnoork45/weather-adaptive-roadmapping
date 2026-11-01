@@ -54,11 +54,8 @@ def iou_batch(boxes_a: np.ndarray, boxes_b: np.ndarray) -> np.ndarray:
 class KalmanBoxTracker:
     """Constant-velocity Kalman filter tracking a single object in [cx,cy,a,h] space."""
 
-    _next_id = 1
-
-    def __init__(self, box: np.ndarray, class_id: int, class_name: str, score: float) -> None:
-        self.id = KalmanBoxTracker._next_id
-        KalmanBoxTracker._next_id += 1
+    def __init__(self, box: np.ndarray, class_id: int, class_name: str, score: float, track_id: int) -> None:
+        self.id = track_id
         self.class_id, self.class_name, self.score = class_id, class_name, score
 
         self.ndim = 4
@@ -115,6 +112,10 @@ class ByteTracker:
         self.tracked: List[KalmanBoxTracker] = []
         self.lost: List[KalmanBoxTracker] = []
         self.frame_id = 0
+        # Track IDs are numbered per tracker (1, 2, 3, ...), so independent trackers --
+        # e.g. two dashboard sessions, or a pipeline after reset() -- never share or
+        # shift each other's IDs (this used to be one process-wide class counter).
+        self._next_id = 1
 
     def update(self, detections: List[Detection]) -> List[Detection]:
         self.frame_id += 1
@@ -199,7 +200,9 @@ class ByteTracker:
 
         for d_idx in unmatched_dets:
             new_track = KalmanBoxTracker(high_boxes[d_idx], high_dets[d_idx].class_id,
-                                          high_dets[d_idx].class_name, float(high_scores[d_idx]))
+                                          high_dets[d_idx].class_name, float(high_scores[d_idx]),
+                                          track_id=self._next_id)
+            self._next_id += 1
             high_dets[d_idx].track_id = new_track.id
             self.tracked.append(new_track)
 

@@ -72,7 +72,8 @@ The offline evaluation files run outside the live pipeline. All KITTI data and d
 | `kitti_tracking.py`, `kitti_velocity_gt.py`, `velocity_eval.py`, `velocity_b0.py`, `evaluate_kitti_velocity.py`, `tests_kitti_tracking.py`, `task5_evaluation_protocol.md` | Task 5: KITTI tracking velocity evaluation of the production estimator. `velocity_b0.py` is a byte-identical frozen copy of `relative_velocity.py`. |
 | `velocity_experimental.py`, `tests_velocity_experimental.py`, `scripts/task5/`, `task5_stage2_results.md` | Task 5 Stage 2: the experimental KS velocity estimator. Offline only; **not integrated** into the live pipeline. |
 | `ego_motion.py`, `evaluate_kitti_egomotion.py`, `tests_ego_motion.py`, `task5_stage3_ego_motion_results.md` | Task 5 Stage 3: experimental monocular ego-motion. Stopped; **not integrated**. |
-| `tests.py`, `tests_foundation.py` | Pipeline tests; configuration, logging, recorder, packaging and lock tests |
+| `tests.py`, `tests_foundation.py`, `tests_regression.py` | Pipeline tests; configuration, logging, recorder, packaging and lock tests; golden-output regression and runtime-state tests |
+| `scripts/regression/` | `golden.py` (golden `road.mp4` outputs, KITTI check against the Task 5 cache, reset determinism) and its README |
 | `research_audit.md` | Earlier research audit |
 
 **Kept, pending a separate clean-up decision (not used by the software):**
@@ -243,7 +244,7 @@ Without a checkpoint the pipeline uses a heuristic fallback and says so in the l
 ### 5. Run the tests
 
 ```bash
-pytest tests.py tests_depth.py tests_kitti_tracking.py tests_velocity_experimental.py tests_ego_motion.py tests_foundation.py -q
+pytest tests.py tests_depth.py tests_kitti_tracking.py tests_velocity_experimental.py tests_ego_motion.py tests_foundation.py tests_regression.py -q
 ```
 
 ## Setup (VS Code)
@@ -546,7 +547,7 @@ config_schema.ConfigError: Invalid configuration file config.yaml (2 problem(s))
 ## Testing
 
 ```bash
-pytest tests.py tests_depth.py tests_kitti_tracking.py tests_velocity_experimental.py tests_ego_motion.py tests_foundation.py -q
+pytest tests.py tests_depth.py tests_kitti_tracking.py tests_velocity_experimental.py tests_ego_motion.py tests_foundation.py tests_regression.py -q
 ```
 By default the tests run on CPU with synthetic frames. Set `TEST_DEVICE=cuda` to run the pipeline tests on the GPU.
 
@@ -556,8 +557,9 @@ By default the tests run on CPU with synthetic frames. Set `TEST_DEVICE=cuda` to
 | `tests_depth.py` | Depth units, masks, calibration, the KITTI depth loader |
 | `tests_kitti_tracking.py`, `tests_velocity_experimental.py`, `tests_ego_motion.py` | Task 5 evaluation code |
 | `tests_foundation.py` | <ul><li>Configuration validation.</li><li>No import-time logging side effects.</li><li>The run recorder, including failure and interruption handling.</li><li>`run_weather_classification`.</li><li>`setup.py` module coverage and the environment lock.</li></ul> |
+| `tests_regression.py` | <ul><li>Exact golden comparison of `road.mp4` outputs (relative and metric).</li><li>KITTI 0000, frames 0–49, against the frozen Task 5 cache.</li><li>Determinism after `PerceptionPipeline.reset()`, and with models shared across threads.</li><li>Independent pipelines and trackers.</li><li>Model backend status.</li><li>`run.py --synthetic`.</li><li>Two Streamlit sessions.</li></ul> See `scripts/regression/README.md`. |
 
-Tests that need the KITTI data skip when it is absent. One test also needs `KITTI_VELOCITY_CACHE` set to a Task 5 cache directory.
+Tests that need the KITTI data skip when it is absent. One test also needs `KITTI_VELOCITY_CACHE` set to a Task 5 cache directory. The golden checks skip, with the reason, when `road.mp4`, the goldens in `outputs/regression/` or a GPU are missing, or when the environment fingerprint differs from the one the goldens were recorded in.
 
 ### Final Testing Checklist (using your `road.mp4`)
 

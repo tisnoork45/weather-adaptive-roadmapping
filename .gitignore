@@ -80,6 +80,9 @@ outputs/experiments/
 # outputs derived from licensed data (e.g. KITTI frames), so they stay local.
 outputs/runs/
 
+# Golden regression outputs (scripts/regression/); large and machine-specific.
+outputs/regression/
+
 # Local archives, imported logs and notebook checkpoints
 *.zip
 imported_logs/

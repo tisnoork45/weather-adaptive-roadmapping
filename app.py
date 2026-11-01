@@ -13,13 +13,16 @@ Run with:
 
 from __future__ import annotations
 
+import threading
 import time
 
 import cv2
 import streamlit as st
 
 from pipeline import (
+    PerceptionModels,
     PerceptionPipeline,
+    model_config_key,
     render_bev_panel,
     render_camera_feed,
     render_dashboard_css,
@@ -42,11 +45,25 @@ logger = get_logger(__name__)
 st.set_page_config(page_title="Weather Adaptive Road Mapping", page_icon="🚗", layout="wide")
 
 
-@st.cache_resource(show_spinner="Loading perception pipeline (models)...")
-def load_pipeline() -> PerceptionPipeline:
-    config = load_config("config.yaml")
-    configure_logging_from_config(config)
-    return PerceptionPipeline(config)
+@st.cache_resource(show_spinner="Loading perception models...")
+def load_shared_models(model_key: str, _config) -> PerceptionModels:
+    """The trained models, loaded once per process and shared by every browser
+    session (inference is serialised per model). They hold no per-stream state."""
+    return PerceptionModels.load(_config).thread_safe()
+
+
+def session_pipeline() -> PerceptionPipeline:
+    """This browser session's own pipeline: its own tracks, velocity histories,
+    smoothing and metrics, on top of the shared models. Kept in st.session_state,
+    so other sessions never see or change it."""
+    if "pipeline" not in st.session_state:
+        config = load_config("config.yaml")
+        configure_logging_from_config(config)
+        models = load_shared_models(model_config_key(config), config)
+        st.session_state["pipeline"] = PerceptionPipeline(config, models=models)
+        # Held by whichever script run is streaming through this session's pipeline (see main()).
+        st.session_state["pipeline_lock"] = threading.Lock()
+    return st.session_state["pipeline"]
 
 
 SOURCE_SYNTHETIC = "Synthetic demo stream"
@@ -102,7 +119,7 @@ def _default_video_path(cfg) -> str:
 
 
 def main() -> None:
-    pipeline = load_pipeline()
+    pipeline = session_pipeline()
     cfg = pipeline.config
 
     # Injected exactly once per script run -- never re-injected inside the
@@ -173,84 +190,98 @@ def main() -> None:
         st.info("Toggle 'Run live pipeline' in the sidebar to start streaming.")
         return
 
-    next_frame_fn, stream, video_fps = get_frame_source(cfg, source_kind, video_path)
-    recorder = None
-    if record_run:
-        source_desc = {SOURCE_SYNTHETIC: "synthetic demo stream", SOURCE_VIDEO: video_path}.get(
-            source_kind, cfg.camera.source)
-        recorder = RunRecorder.start(cfg, pipeline, source=source_desc, fps=video_fps,
-                                     command=["streamlit", "run", "app.py"])
-    run_status, run_error = STATUS_COMPLETE, None
+    # With Streamlit's fast reruns, a widget change starts the new script run while the
+    # previous one is still finishing its current frame (it stops at its next st.* call).
+    # Both would use this session's pipeline, so the whole stream -- opening the source,
+    # reset(), the frame loop and the cleanup -- runs under the session's lock: the new
+    # run waits (about one frame) until the previous run has stopped and released it.
+    # The lock is per session; other sessions, and the shared models, are not blocked by it.
+    with st.session_state["pipeline_lock"]:
+        next_frame_fn, stream, video_fps = get_frame_source(cfg, source_kind, video_path)
+        # Every script run (any widget change, including switching the source) opens
+        # the source again from its first frame, so this session's temporal state
+        # starts again with it: no tracks or velocities carried over from the old stream.
+        pipeline.reset()
+        recorder = None
+        if record_run:
+            source_desc = {SOURCE_SYNTHETIC: "synthetic demo stream", SOURCE_VIDEO: video_path}.get(
+                source_kind, cfg.camera.source)
+            recorder = RunRecorder.start(cfg, pipeline, source=source_desc, fps=video_fps,
+                                         command=["streamlit", "run", "app.py"])
+        run_status, run_error = STATUS_COMPLETE, None
 
-    try:
-        frame_budget = 1.0 / max(cfg.pipeline.target_fps, 1)
-        for frame_index in range(100000):  # effectively unbounded; Streamlit reruns handle looping
-            loop_start = time.perf_counter()
-            frame = next_frame_fn()
-            if frame is None:
-                st.warning("End of video stream reached.")
-                break
+        try:
+            frame_budget = 1.0 / max(cfg.pipeline.target_fps, 1)
+            # Effectively unbounded; Streamlit reruns handle looping. A "max_frames" entry in
+            # session state (set only by headless tests) stops the stream early.
+            max_frames = int(st.session_state.get("max_frames", 0)) or 100000
+            for frame_index in range(max_frames):
+                loop_start = time.perf_counter()
+                frame = next_frame_fn()
+                if frame is None:
+                    st.warning("End of video stream reached.")
+                    break
 
-            # Video files: video-timeline timestamp (see run.py). Live camera /
-            # synthetic: None, so the pipeline's wall-clock fallback is used,
-            # which is correct when "now" is the frame.
-            timestamp = frame_index / video_fps if video_fps else None
-            output = pipeline.process(frame, timestamp=timestamp)
-            if recorder is not None:
-                recorder.record(output, frame_index, timestamp)   # reads the output only; never raises
+                # Video files: video-timeline timestamp (see run.py). Live camera /
+                # synthetic: None, so the pipeline's wall-clock fallback is used,
+                # which is correct when "now" is the frame.
+                timestamp = frame_index / video_fps if video_fps else None
+                output = pipeline.process(frame, timestamp=timestamp)
+                if recorder is not None:
+                    recorder.record(output, frame_index, timestamp)   # reads the output only; never raises
 
-            status_badge_placeholder.markdown(render_status_badge_html(output), unsafe_allow_html=True)
-            metric_row_placeholder.markdown(render_metric_row_html(output), unsafe_allow_html=True)
+                status_badge_placeholder.markdown(render_status_badge_html(output), unsafe_allow_html=True)
+                metric_row_placeholder.markdown(render_metric_row_html(output), unsafe_allow_html=True)
 
-            annotated = render_camera_feed(output)
-            camera_placeholder.image(
-                cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), channels="RGB", width="stretch",
-            )
+                annotated = render_camera_feed(output)
+                camera_placeholder.image(
+                    cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB), channels="RGB", width="stretch",
+                )
 
-            sensor_status_placeholder.markdown(
-                render_sensor_status_html(output, cfg.pipeline), unsafe_allow_html=True,
-            )
-            bev_placeholder.image(
-                cv2.cvtColor(render_bev_panel(output), cv2.COLOR_BGR2RGB), channels="RGB", width="stretch",
-            )
+                sensor_status_placeholder.markdown(
+                    render_sensor_status_html(output, cfg.pipeline), unsafe_allow_html=True,
+                )
+                bev_placeholder.image(
+                    cv2.cvtColor(render_bev_panel(output), cv2.COLOR_BGR2RGB), channels="RGB", width="stretch",
+                )
 
-            weather_placeholder.markdown(render_weather_card_html(output), unsafe_allow_html=True)
-            depth_placeholder.image(
-                cv2.cvtColor(render_depth_panel(output), cv2.COLOR_BGR2RGB), channels="RGB", width="stretch",
-            )
+                weather_placeholder.markdown(render_weather_card_html(output), unsafe_allow_html=True)
+                depth_placeholder.image(
+                    cv2.cvtColor(render_depth_panel(output), cv2.COLOR_BGR2RGB), channels="RGB", width="stretch",
+                )
 
-            risk_guide_placeholder.markdown(
-                render_risk_guide_html(output, pipeline.risk_engine), unsafe_allow_html=True,
-            )
-            sensor_weights_placeholder.markdown(render_sensor_weights_html(output), unsafe_allow_html=True)
+                risk_guide_placeholder.markdown(
+                    render_risk_guide_html(output, pipeline.risk_engine), unsafe_allow_html=True,
+                )
+                sensor_weights_placeholder.markdown(render_sensor_weights_html(output), unsafe_allow_html=True)
 
-            diagnostics_placeholder.markdown(render_latency_html(output), unsafe_allow_html=True)
+                diagnostics_placeholder.markdown(render_latency_html(output), unsafe_allow_html=True)
 
-            objects_df = render_object_table_df(output)
-            if objects_df is not None:
-                objects_placeholder.dataframe(objects_df, width="stretch", hide_index=True)
+                objects_df = render_object_table_df(output)
+                if objects_df is not None:
+                    objects_placeholder.dataframe(objects_df, width="stretch", hide_index=True)
+                else:
+                    objects_placeholder.info("No objects currently detected.")
+
+                elapsed = time.perf_counter() - loop_start
+                time.sleep(max(0.0, frame_budget - elapsed))
+        except Exception as exc:
+            # Streamlit signals reruns/stops with exceptions (plain Exception
+            # subclasses in some versions) -- those are control flow, not crashes.
+            if type(exc).__name__ not in ("RerunException", "StopException"):
+                logger.exception("Dashboard pipeline loop crashed.")
+                run_status, run_error = STATUS_FAILED, f"dashboard loop error: {exc!r}"
             else:
-                objects_placeholder.info("No objects currently detected.")
-
-            elapsed = time.perf_counter() - loop_start
-            time.sleep(max(0.0, frame_budget - elapsed))
-    except Exception as exc:
-        # Streamlit signals reruns/stops with exceptions (plain Exception
-        # subclasses in some versions) -- those are control flow, not crashes.
-        if type(exc).__name__ not in ("RerunException", "StopException"):
-            logger.exception("Dashboard pipeline loop crashed.")
-            run_status, run_error = STATUS_FAILED, f"dashboard loop error: {exc!r}"
-        else:
+                run_status = STATUS_INTERRUPTED
+            raise
+        except BaseException:
             run_status = STATUS_INTERRUPTED
-        raise
-    except BaseException:
-        run_status = STATUS_INTERRUPTED
-        raise
-    finally:
-        if recorder is not None:
-            recorder.close(run_status, run_error)
-        if stream is not None:
-            stream.release()
+            raise
+        finally:
+            if recorder is not None:
+                recorder.close(run_status, run_error)
+            if stream is not None:
+                stream.release()
 
 
 if __name__ == "__main__":
