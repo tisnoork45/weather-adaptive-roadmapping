@@ -95,13 +95,19 @@ class _StubModel:
         self._use_fallback, self.model, self.device = fallback, object(), "cpu"
         self.check_overlap, self.active, self.overlaps = check_overlap, 0, 0
         self._count_lock = threading.Lock()                # protects the counters, not infer()
+        self.rendezvous = None                             # see test_each_model_has_its_own_lock
+        self._rendezvous_left = 0
 
     def infer(self, frame: np.ndarray):
         with self._count_lock:
             self.active += 1
             if self.active > 1:
                 self.overlaps += 1
+            wait = self._rendezvous_left > 0
+            self._rendezvous_left -= wait
         try:
+            if wait:                                       # the first two calls meet inside infer()
+                self.rendezvous.wait(timeout=10)
             if self.check_overlap:
                 time.sleep(0.002)                          # widen the window for overlapping calls
             return self._infer(int(frame[0, 0, 0]), frame)
@@ -234,10 +240,16 @@ def test_shared_models_serialise_inference_and_threads_keep_their_own_state(cfg)
 @pytest.mark.parametrize("unlocked", MODEL_ROLES)
 def test_each_model_has_its_own_lock(cfg, unlocked) -> None:
     """Leave one model unwrapped: only that model sees overlapping calls. This shows the
-    overlap check can fail, and that each model is serialised by its own lock."""
+    overlap check can fail, and that each model is serialised by its own lock.
+
+    The unwrapped model makes its first two calls wait for each other inside infer(),
+    so they overlap whatever the thread timing (otherwise the locked models before it
+    can serialise the threads by chance and hide the overlap)."""
     models = _stub_models(cfg, check_overlap=True)
     shared = models.thread_safe()
-    setattr(shared, unlocked, getattr(models, unlocked))                      # this one without its lock
+    bare = getattr(models, unlocked)
+    bare.rendezvous, bare._rendezvous_left = threading.Barrier(2), 2
+    setattr(shared, unlocked, bare)                                           # this one without its lock
     _run_threads([PerceptionPipeline(cfg, models=shared) for _ in range(4)])
     assert getattr(models, unlocked).overlaps > 0
     for role in MODEL_ROLES:
@@ -311,26 +323,26 @@ def test_streamlit_sessions_have_independent_pipelines_on_shared_models(workdir,
     assert pa is not pb and pa.tracker is not pb.tracker and pa.velocity_estimator is not pb.velocity_estimator
     assert pa.models is pb.models and pa.detector is pb.detector              # one copy of the models
     assert (pa.metrics.frame_count, pb.metrics.frame_count) == (4, 2)
-    assert len(a.get("image")) == 3                                           # camera, BEV and depth panels
+    assert len(a.get("image")) == 2                                           # camera and depth (BEV needs metric depth)
     assert any("ROAD STATUS" in m.value for m in a.markdown)
     lock_a = a.session_state["pipeline_lock"]
     assert lock_a is not b.session_state["pipeline_lock"]                    # one lock per session
-    a.run()                                                                   # a rerun restarts A's stream ...
+    a.run()                                                                   # an ordinary rerun of A ...
     assert a.session_state["pipeline"] is pa and a.session_state["pipeline_lock"] is lock_a   # ... same objects
-    assert pa.metrics.frame_count == 4 and pb.metrics.frame_count == 2        # ... from a reset state; B untouched
+    assert pa.metrics.frame_count == 8 and a.session_state["position"] == 8  # ... continues A's stream
+    assert pb.metrics.frame_count == 2                                        # B untouched
     assert not lock_a.locked()                                                # released when the run ends
 
     # A run that starts while the session lock is held (the previous run still finishing)
-    # waits for it: no reset() and no frame until the lock is released.
-    pa.process(_frame(0))                                                     # a 5th frame, so a reset is visible
+    # waits for it: no frame is processed until the lock is released.
     lock_a.acquire()
     rerun = threading.Thread(target=a.run)
     try:
         rerun.start()
         time.sleep(1.0)
-        assert rerun.is_alive() and pa.metrics.frame_count == 5               # still waiting, state untouched
+        assert rerun.is_alive() and pa.metrics.frame_count == 8               # still waiting, state untouched
     finally:
         lock_a.release()
     rerun.join(timeout=300)
     assert not rerun.is_alive() and not a.exception
-    assert pa.metrics.frame_count == 4 and pb.metrics.frame_count == 2        # then reset and streamed 4 frames
+    assert pa.metrics.frame_count == 12 and pb.metrics.frame_count == 2       # then continued with 4 frames

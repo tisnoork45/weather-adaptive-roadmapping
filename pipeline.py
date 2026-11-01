@@ -28,7 +28,7 @@ from config_schema import ensure_valid
 from fusion import AdaptiveFusionEngine, ConfidenceEstimator, FusionResult, ModuleConfidence
 from mapping import BEVMapper, BEVResult
 from models import (
-    DEPTH_KIND_HEURISTIC, DEPTH_KIND_NONE, DEPTH_KIND_RELATIVE, DepthEstimator, DepthResult,
+    DEPTH_KIND_HEURISTIC, DEPTH_KIND_METRIC, DEPTH_KIND_NONE, DEPTH_KIND_RELATIVE, DepthEstimator, DepthResult,
     DetectionResult, WeatherClassifier, WeatherResult, WeatherTemporalSmoother, YOLODetector,
 )
 from relative_velocity import RelativeVelocity, RelativeVelocityEstimator
@@ -482,6 +482,23 @@ def display_depth(depth: DepthResult) -> np.ndarray:
     return -depth.depth_map if depth.kind == DEPTH_KIND_RELATIVE else depth.depth_map
 
 
+def metric_unavailable_reason(output: PipelineOutput, pipeline_cfg) -> Optional[str]:
+    """Why BEV, relative velocity, TTC and risk were not computed this frame, or None
+    if they were. They need BEV mapping enabled and metric depth."""
+    if output.risk is not None or output.bev is not None:
+        return None
+    if not pipeline_cfg.run_bev_mapping:
+        return "BEV mapping is disabled in config.yaml"
+    kind = output.depth.kind
+    if kind == DEPTH_KIND_NONE:
+        return "depth estimation is disabled in config.yaml"
+    if kind == DEPTH_KIND_HEURISTIC:
+        return "depth fell back to a heuristic, which has no metric scale"
+    if kind == DEPTH_KIND_RELATIVE:
+        return "relative depth has no metric scale"
+    return f"depth kind '{kind}' has no metric scale"
+
+
 def _format_distance(distance_m: Optional[float]) -> str:
     return f"{distance_m:.1f} m" if distance_m is not None else "N/A"
 
@@ -553,6 +570,8 @@ DASHBOARD_CSS = """
     font-family:'Courier New',monospace; color:#c7d3dd; padding:4px 0; }
 .risk-guide-dot { width:9px; height:9px; border-radius:50%; flex:0 0 9px; }
 .risk-guide-label { flex:0 0 78px; font-weight:700; }
+.card-note { font-size:0.65rem; color:#7a8896; margin-top:8px; line-height:1.35; }
+.card-value { font-size:1.05rem; font-weight:700; color:#e8f6ff; font-family:'Courier New',monospace; }
 </style>
 """
 
@@ -579,20 +598,24 @@ def render_header(st, title: str) -> None:
     )
 
 
-def render_status_badge_html(output: PipelineOutput) -> str:
+def render_status_badge_html(output: PipelineOutput, activity: str = "PROCESSING",
+                             risk_note: Optional[str] = None) -> str:
     """Live road-status badge, sourced from output.risk.overall_risk_level
     (the actual backend RiskEngine result). If risk is unavailable this
-    frame (e.g. BEV mapping disabled), shows N/A rather than a fabricated
-    status -- never defaults to SAFE by omission."""
+    frame (e.g. relative depth), shows N/A and why (``risk_note``) rather than
+    a fabricated status -- never defaults to SAFE by omission. ``activity`` is
+    the dashboard's real playback state (PROCESSING, PAUSED, ENDED), never a
+    fixed "ACTIVE"."""
     level = output.risk.overall_risk_level if output.risk is not None else None
     label = level if level is not None else "N/A"
     color = _risk_status_color(level)
+    note = f" &middot; risk not computed: {risk_note}" if level is None and risk_note else ""
     return f"""
     <div class="hud-status-row">
         <div class="hud-status-badge" style="border-color:{color};color:{color};">
             <span class="dot" style="background:{color};"></span>ROAD STATUS: {label}
         </div>
-        <div class="hud-status-sub">VISION PERCEPTION<span class="active-dot"></span>ACTIVE</div>
+        <div class="hud-status-sub">CAMERA PERCEPTION &middot; {activity}{note}</div>
     </div>"""
 
 
@@ -601,10 +624,11 @@ def render_metric_row_html(output: PipelineOutput) -> str:
     from PipelineOutput -- CONFIDENCE here is the weather classifier's own
     confidence (output.weather.confidence), matching what's shown again,
     in more detail, in the weather card. Overall fusion scene-confidence is
-    shown separately inside the Sensor Status panel."""
+    shown separately inside the Module Status panel."""
+    weather_off = output.model_status.get("weather") == BACKEND_DISABLED or output.weather.label == WEATHER_UNKNOWN
     items = [
-        ("WEATHER", output.weather.label.upper()),
-        ("CONFIDENCE", f"{output.weather.confidence * 100:.0f}%"),
+        ("WEATHER", "DISABLED" if weather_off else output.weather.label.upper()),
+        ("WEATHER CONF.", "&mdash;" if weather_off else f"{output.weather.confidence * 100:.0f}%"),
         ("OBJECTS", f"{len(output.detections)}"),
         ("FPS", f"{output.metrics.get('fps', 0.0):.1f}"),
         ("LATENCY", f"{output.total_latency_ms:.0f} ms"),
@@ -771,7 +795,7 @@ def render_camera_feed(output: PipelineOutput) -> np.ndarray:
                 bev_distance_by_track[obj.track_id] = obj.z_m
     distances = [bev_distance_by_track.get(d.track_id) for d in dets.detections]
 
-    # Detection opacity driven by the ACTUAL current adaptive sensor
+    # Detection opacity driven by the ACTUAL current adaptive module
     # weights -- makes the project's core weather-adaptive-fusion thesis
     # visible directly on the camera feed (lower trust in fog/rain/night ->
     # visibly fainter overlays), using an already-computed backend value.
@@ -796,6 +820,9 @@ def render_weather_card_html(output: PipelineOutput) -> str:
     if not probs:
         bars = ('<div style="font-size:0.72rem;color:#7a8896;">Classification disabled in config.yaml; '
                 'weather adjustments are neutral (x1.0).</div>')
+    elif output.model_status.get("weather") == BACKEND_FALLBACK:
+        bars += ('<div class="card-note">Heuristic fallback (image statistics), not the trained '
+                 'weather classifier.</div>')
     return f"""
     <div class="hud-card">
         <div class="hud-card-title">WEATHER</div>
@@ -805,38 +832,139 @@ def render_weather_card_html(output: PipelineOutput) -> str:
     </div>"""
 
 
-def render_sensor_status_html(output: PipelineOutput, pipeline_cfg) -> str:
-    """Rule 13: per-module confidence where a real one exists
-    (fusion.module_confidences, for detection/depth), ACTIVE/INACTIVE
-    (from the real config.pipeline flags) where it doesn't (tracking, BEV --
-    neither produces a scalar confidence anywhere in the backend)."""
+# Status tags: (text, colour). Backends come from PipelineOutput.model_status; the other
+# stages report whether they actually ran this frame.
+BACKEND_TAGS = {
+    BACKEND_NETWORK: ("MODEL INFERENCE", "#00e5ff"),
+    BACKEND_FALLBACK: ("HEURISTIC FALLBACK", "#ffb020"),
+    BACKEND_DISABLED: ("DISABLED", "#5a6472"),
+}
+STAGE_RUNNING, STAGE_INACTIVE, STAGE_DISABLED = ("RUNNING", "#00e5ff"), ("INACTIVE", "#5a6472"), ("DISABLED", "#5a6472")
+
+
+def _status_tag(tag) -> str:
+    text, color = tag
+    return f'<span class="status-tag" style="color:{color};border:1px solid {color};">{text}</span>'
+
+
+def render_module_status_html(output: PipelineOutput, pipeline_cfg) -> str:
+    """What each software module did this frame. Models show their backend
+    (MODEL INFERENCE / HEURISTIC FALLBACK / DISABLED, from output.model_status); a
+    fallback is never shown as a trained model. For detection and weather that is
+    the configured (as loaded) backend, not per-frame success; depth is per frame. Tracking, BEV and velocity/TTC/risk
+    show RUNNING, DISABLED (off in config.yaml) or INACTIVE (enabled, but not running:
+    they need metric depth). Confidence bars are shown where a real module confidence
+    exists (fusion.module_confidences, for detection and depth)."""
     conf = output.fusion.module_confidences
+    status = output.model_status
 
-    def _row(label: str, value: Optional[float], active: bool) -> str:
-        status_color = "#00e5ff" if active else "#5a6472"
-        status_text = "ACTIVE" if active else "INACTIVE"
-        tag = f'<span class="status-tag" style="color:{status_color};border:1px solid {status_color};">{status_text}</span>'
+    def _row(label: str, value: Optional[float], tag) -> str:
         if value is None:
-            return f'<div class="status-line"><span>{label}</span>{tag}</div>'
+            return f'<div class="status-line"><span>{label}</span>{_status_tag(tag)}</div>'
         bar = _progress_bar_html(label, value, f"{value * 100:.0f}%")
-        return f'{bar}<div style="text-align:right;margin-top:-5px;">{tag}</div>'
+        return f'{bar}<div style="text-align:right;margin-top:-5px;">{_status_tag(tag)}</div>'
 
+    def _backend(name: str):
+        return BACKEND_TAGS.get(status.get(name, ""), ("UNKNOWN", "#5a6472"))
+
+    def _stage(enabled: bool, ran: bool):
+        return STAGE_RUNNING if ran else (STAGE_INACTIVE if enabled else STAGE_DISABLED)
+
+    depth_conf = conf.get("camera_depth") if status.get("depth") != BACKEND_DISABLED else None
     rows = (
-        _row("Camera Detection", conf.get("camera_detection"), True)
-        + _row("Depth Estimation", conf.get("camera_depth"), pipeline_cfg.run_depth_estimation)
-        + _row("Object Tracking", None, pipeline_cfg.run_tracking)
-        + _row("BEV Mapping", None, output.bev is not None)   # needs metric depth
+        _row("Object Detection", conf.get("camera_detection"), _backend("detection"))
+        + _row("Depth Estimation", depth_conf, _backend("depth"))
+        + _row("Weather Classification", None, _backend("weather"))
+        + _row("Object Tracking", None, STAGE_RUNNING if pipeline_cfg.run_tracking else STAGE_DISABLED)
+        + _row("BEV Mapping", None, _stage(pipeline_cfg.run_bev_mapping, output.bev is not None))
+        + _row("Velocity / TTC / Risk", None, _stage(pipeline_cfg.run_bev_mapping, output.risk is not None))
     )
+    notes = [
+        # model_status for detection and weather comes from how the model loaded; a
+        # non-strict per-frame fallback after a failed inference is only logged.
+        "Detection and weather labels show the configured backend (as loaded), not a guarantee "
+        "that every frame's inference succeeded: in non-strict mode a failed frame falls back to "
+        "the heuristic and is only logged. Depth is reported per frame.",
+    ]
+    if BACKEND_FALLBACK in status.values():
+        notes.append("HEURISTIC FALLBACK: a classical image heuristic is used instead of the trained model.")
+    reason = metric_unavailable_reason(output, pipeline_cfg)
+    if reason and pipeline_cfg.run_bev_mapping:
+        notes.append(f"INACTIVE: enabled in config.yaml but not running ({reason}).")
     scene_conf = output.fusion.overall_scene_confidence * 100.0
+    notes.append(f"Overall scene confidence (software score): {scene_conf:.0f}%")
+    notes_html = "".join(f'<div class="card-note" style="margin-top:4px;">{n}</div>' for n in notes)
     return f"""
     <div class="hud-card">
-        <div class="hud-card-title">SENSOR STATUS</div>
+        <div class="hud-card-title">MODULE STATUS</div>
         {rows}
-        <div style="font-size:0.65rem;color:#7a8896;margin-top:4px;">Overall scene confidence: {scene_conf:.0f}%</div>
+        {notes_html}
     </div>"""
 
 
-def render_risk_guide_html(output: PipelineOutput, risk_engine: Optional[RiskEngine]) -> str:
+def render_depth_calibration_html(output: PipelineOutput, pipeline_cfg) -> str:
+    """Which depth this frame used, the camera's calibration status, and whether
+    distance / relative speed / TTC are available. Never implies that relative or
+    heuristic depth is a metric distance, or that metric estimates are validated."""
+    kind = output.depth.kind
+    strict = bool(pipeline_cfg.get("strict", False))
+    if kind == DEPTH_KIND_METRIC:
+        mode = "METRIC (STRICT)" if strict else "METRIC (NON-STRICT)"
+        detail = ("Monocular metric depth model (Depth Anything V2 metric): an estimate in metres "
+                  "from one camera image, not a range measurement.")
+        if not strict:
+            detail += " Non-strict: if the model failed, the heuristic fallback would be used and shown here."
+    elif kind == DEPTH_KIND_RELATIVE:
+        mode = "RELATIVE"
+        detail = ("Unitless relative (inverse) depth from Depth Anything V2. The colour map shows "
+                  "near/far order only; there is no metric scale.")
+    elif kind == DEPTH_KIND_HEURISTIC:
+        mode = "HEURISTIC FALLBACK"
+        detail = "Image-based heuristic, not a trained depth model. No metric scale."
+    elif kind == DEPTH_KIND_NONE:
+        mode = "DISABLED"
+        detail = "Depth estimation is disabled in config.yaml."
+    else:
+        mode, detail = kind.upper(), "Unknown depth kind; no metric scale assumed."
+
+    cam = output.camera
+    if cam is None:
+        camera = "Camera intrinsics: not available."
+    elif cam.calibrated:
+        camera = f"Camera: calibrated intrinsics ({cam.source})."
+    else:
+        camera = ("Camera: UNCALIBRATED &mdash; placeholder intrinsics from config.yaml, "
+                  "scaled to the frame size.")
+
+    reason = metric_unavailable_reason(output, pipeline_cfg)
+    if reason:
+        metric = f"Distance, relative speed and TTC: unavailable ({reason})."
+    else:
+        metric = ("Distance, relative speed and TTC: monocular estimates, not validated against "
+                  "ground truth for this camera or video.")
+        if cam is not None and not cam.calibrated:
+            metric += " With an uncalibrated camera they are approximate."
+    return f"""
+    <div class="hud-card">
+        <div class="hud-card-title">DEPTH &amp; CALIBRATION</div>
+        <div class="card-value">{mode}</div>
+        <div class="card-note">{detail}</div>
+        <div class="card-note">{camera}</div>
+        <div class="card-note">{metric}</div>
+    </div>"""
+
+
+def render_unavailable_card_html(title: str, message: str) -> str:
+    """A panel whose data does not exist this frame: says why instead of showing an empty image."""
+    return f"""
+    <div class="hud-card">
+        <div class="hud-card-title">{title}</div>
+        <div class="card-note" style="font-size:0.75rem;">{message}</div>
+    </div>"""
+
+
+def render_risk_guide_html(output: PipelineOutput, risk_engine: Optional[RiskEngine],
+                           risk_note: Optional[str] = None) -> str:
     """Rule 15: NEVER hardcodes TTC thresholds -- calls the real
     RiskEngine.get_weather_adjusted_thresholds() (an existing, unmodified
     backend method) for the CURRENT weather label, so fog/rain/snow
@@ -857,6 +985,10 @@ def render_risk_guide_html(output: PipelineOutput, risk_engine: Optional[RiskEng
         ("CAUTION", RISK_LEVEL_COLORS["CAUTION"], f"{_fmt(warning)} &ndash; {_fmt(caution)}"),
         ("SAFE", RISK_LEVEL_COLORS["SAFE"], f"TTC &ge; {_fmt(caution)}"),
     ]
+    inactive = ""
+    if output.risk is None:
+        inactive = (f'<div class="card-note">Thresholds only: risk is not being computed'
+                    f'{" (" + risk_note + ")" if risk_note else ""}.</div>')
     rows_html = "".join(
         f'<div class="risk-guide-row"><span class="risk-guide-dot" style="background:{_bgr_to_css_rgb(color)};"></span>'
         f'<span class="risk-guide-label">{level}</span><span>{desc}</span></div>'
@@ -867,11 +999,14 @@ def render_risk_guide_html(output: PipelineOutput, risk_engine: Optional[RiskEng
         <div class="hud-card-title">RISK LEVEL GUIDE</div>
         {rows_html}
         <div style="font-size:0.62rem;color:#7a8896;margin-top:8px;">Weather-adjusted for: {output.weather.label.upper()}</div>
+        {inactive}
     </div>"""
 
 
-def render_sensor_weights_html(output: PipelineOutput) -> str:
-    """Rule 18: actual output.fusion.sensor_weights, no invented values."""
+def render_module_weights_html(output: PipelineOutput) -> str:
+    """Rule 18: actual output.fusion.sensor_weights, no invented values. Shown as
+    module weights: both are software modules on the same camera image (the
+    backend field keeps its historical name, sensor_weights)."""
     weights = output.fusion.sensor_weights
     label_map = {"camera_detection": "Detection", "camera_depth": "Depth"}
     bars = "".join(
@@ -879,8 +1014,11 @@ def render_sensor_weights_html(output: PipelineOutput) -> str:
     ) or '<div style="color:#7a8896;font-size:0.72rem;">No fusion data yet.</div>'
     return f"""
     <div class="hud-card">
-        <div class="hud-card-title">ADAPTIVE SENSOR WEIGHTS</div>
+        <div class="hud-card-title">ADAPTIVE MODULE WEIGHTS</div>
         {bars}
+        <div class="card-note">Software weighting of the detection and depth modules, both computed
+        from the same camera image and adjusted for weather. This is not physical sensor fusion:
+        there is no LiDAR, radar or IMU.</div>
     </div>"""
 
 
@@ -925,7 +1063,8 @@ def render_latency_html(output: PipelineOutput) -> str:
 
 def render_object_table_df(output: PipelineOutput):
     """Rule 20: full detail table, relocated to an expander below the fold.
-    Extends the original columns with Distance/TTC/Relative Speed/Risk --
+    Track ID is a nullable integer column (<NA> = not tracked). Extends the
+    original columns with Distance/TTC/Relative Speed/Risk --
     all sourced from output.risk.per_object / output.relative_velocities by
     track_id lookup, "N/A" where a given object has no valid entry yet
     (e.g. brand-new track, or risk unavailable this frame). Returns None if
@@ -945,7 +1084,7 @@ def render_object_table_df(output: PipelineOutput):
         obj_risk = risk_by_track.get(d.track_id)
         velocity = vel_by_track.get(d.track_id)
         rows.append({
-            "Track ID": d.track_id if d.track_id is not None else "-",
+            "Track ID": d.track_id,
             "Class": d.class_name,
             "Confidence": round(d.confidence, 3),
             # Estimates from monocular metric depth (no LiDAR/radar); N/A in relative depth mode.
@@ -954,4 +1093,8 @@ def render_object_table_df(output: PipelineOutput):
             "TTC (est.)": _format_ttc(obj_risk.ttc_seconds) if obj_risk else "N/A",
             "Risk": obj_risk.risk_level if obj_risk else "N/A",
         })
-    return pd.DataFrame(rows)
+    table = pd.DataFrame(rows)
+    # One integer type for the column: tracked IDs unchanged, untracked detections
+    # (below the tracking threshold) as a missing value instead of the string "-".
+    table["Track ID"] = table["Track ID"].astype("Int64")
+    return table

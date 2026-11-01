@@ -577,6 +577,6 @@ def test_bev_status_is_inactive_without_metric_depth(relative_pipeline) -> None:
     import pipeline as pl
 
     out = relative_pipeline.process(_road_like_frame(2), timestamp=0.0)
-    html = pl.render_sensor_status_html(out, relative_pipeline.pipeline_cfg)
+    html = pl.render_module_status_html(out, relative_pipeline.pipeline_cfg)
     bev_part = html.split("BEV Mapping", 1)[1]
     assert "INACTIVE" in bev_part.split("</div>", 2)[0] + bev_part.split("</div>", 2)[1]
