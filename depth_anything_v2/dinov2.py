@@ -7,9 +7,11 @@
 #   https://github.com/facebookresearch/dino/blob/main/vision_transformer.py
 #   https://github.com/rwightman/pytorch-image-models/tree/master/timm/models/vision_transformer.py
 
+from collections import OrderedDict
 from functools import partial
 import math
 import logging
+import threading
 from typing import Sequence, Tuple, Union, Callable
 
 import torch
@@ -32,6 +34,58 @@ def named_apply(fn: Callable, module: nn.Module, name="", depth_first=True, incl
     if depth_first and include_root:
         fn(module=module, name=name)
     return module
+
+
+def _autocast_enabled(device_type: str) -> bool:
+    try:
+        return torch.is_autocast_enabled(device_type)
+    except TypeError:  # torch < 2.4 has no device argument
+        return torch.is_autocast_enabled() if device_type == "cuda" else torch.is_autocast_cpu_enabled()
+
+
+class _PosEmbedCache:
+    """Interpolated positional embeddings of ONE DinoVisionTransformer instance.
+
+    Bounded LRU. A narrow lock makes lookups/insertions safe when several threads run
+    inference on the same model; the interpolation itself runs outside the lock (two
+    threads missing at once just compute the same tensor twice). Each entry also keeps
+    a reference to the pos_embed storage it was computed from, so that storage cannot be
+    freed and its address reused by different weights while the entry exists.
+    Copies and pickles of the model start with an empty cache.
+    """
+
+    def __init__(self, max_entries: int = 4):
+        self.max_entries = max_entries
+        self._entries = OrderedDict()
+        self._lock = threading.Lock()
+
+    def __getstate__(self):
+        return {"max_entries": self.max_entries}
+
+    def __setstate__(self, state):
+        self.__init__(state["max_entries"])
+
+    def __len__(self):
+        return len(self._entries)
+
+    def get(self, key):
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            self._entries.move_to_end(key)
+            return entry[0]
+
+    def put(self, key, value, source):
+        with self._lock:
+            self._entries[key] = (value, source)
+            self._entries.move_to_end(key)
+            while len(self._entries) > self.max_entries:
+                self._entries.popitem(last=False)
+
+    def clear(self):
+        with self._lock:
+            self._entries.clear()
 
 
 class BlockChunk(nn.ModuleList):
@@ -102,6 +156,7 @@ class DinoVisionTransformer(nn.Module):
         self.num_register_tokens = num_register_tokens
         self.interpolate_antialias = interpolate_antialias
         self.interpolate_offset = interpolate_offset
+        self._pos_embed_cache = _PosEmbedCache()
 
         self.patch_embed = embed_layer(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
@@ -177,11 +232,35 @@ class DinoVisionTransformer(nn.Module):
         named_apply(init_weights_vit_timm, self)
 
     def interpolate_pos_encoding(self, x, w, h):
-        previous_dtype = x.dtype
         npatch = x.shape[1] - 1
         N = self.pos_embed.shape[1] - 1
         if npatch == N and w == h:
             return self.pos_embed
+        # The interpolated embedding depends only on the weights and the input geometry, not
+        # on pixel content, so inference reuses it per input size. The cache is bypassed
+        # whenever the result could carry autograd history (grad enabled, training mode),
+        # under inference mode and under autocast; those paths compute it as before.
+        if (torch.is_grad_enabled() or self.training or torch.is_inference_mode_enabled()
+                or _autocast_enabled(x.device.type)):
+            return self._interpolate_pos_encoding(x, w, h)
+        cache = self.__dict__.get("_pos_embed_cache")
+        if cache is None:  # instance created without __init__ (e.g. an old pickle)
+            cache = self._pos_embed_cache = _PosEmbedCache()
+        pe = self.pos_embed
+        # pe._version changes on every in-place update (load_state_dict, copy_, optimiser
+        # steps); data_ptr/device/dtype change with .to(), .half(), .cuda() and .data swaps.
+        key = (tuple(x.shape[1:]), w, h, x.dtype, x.device, pe.dtype, pe.device, pe.data_ptr(), pe._version,
+               self.patch_size, self.interpolate_offset, self.interpolate_antialias)
+        cached = cache.get(key)
+        if cached is None:
+            cached = self._interpolate_pos_encoding(x, w, h)
+            cache.put(key, cached, source=pe.detach())
+        # Callers get a copy, so nothing downstream can modify the cached tensor.
+        return cached.clone()
+
+    def _interpolate_pos_encoding(self, x, w, h):
+        previous_dtype = x.dtype
+        N = self.pos_embed.shape[1] - 1
         pos_embed = self.pos_embed.float()
         class_pos_embed = pos_embed[:, 0]
         patch_pos_embed = pos_embed[:, 1:]

@@ -580,3 +580,440 @@ def test_bev_status_is_inactive_without_metric_depth(relative_pipeline) -> None:
     html = pl.render_module_status_html(out, relative_pipeline.pipeline_cfg)
     bev_part = html.split("BEV Mapping", 1)[1]
     assert "INACTIVE" in bev_part.split("</div>", 2)[0] + bev_part.split("</div>", 2)[1]
+
+
+# =============================================================================
+# Output-preserving optimisations: depth preprocessing, DINOv2 positional-embedding
+# cache, Open3D point cloud only on request
+# =============================================================================
+
+
+def _reference_image2tensor(raw: np.ndarray, input_size: int):
+    """The original Depth Anything V2 preprocessing (Compose of Resize, NormalizeImage, PrepareForNet)."""
+    import cv2
+    import torch
+    from torchvision.transforms import Compose
+
+    from depth_anything_v2.util.transform import NormalizeImage, PrepareForNet, Resize
+
+    transform = Compose([
+        Resize(width=input_size, height=input_size, resize_target=False, keep_aspect_ratio=True,
+               ensure_multiple_of=14, resize_method="lower_bound", image_interpolation_method=cv2.INTER_CUBIC),
+        NormalizeImage(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        PrepareForNet(),
+    ])
+    image = cv2.cvtColor(raw, cv2.COLOR_BGR2RGB) / 255.0
+    return torch.from_numpy(transform({"image": image})["image"]).unsqueeze(0)
+
+
+def _on_device():
+    """Stands in for the depth model: image2tensor only reads the device of its parameters."""
+    import torch
+
+    module = torch.nn.Module()
+    module.p = torch.nn.Parameter(torch.zeros(1, device=TEST_DEVICE))
+    return module
+
+
+@pytest.mark.parametrize("height,width,input_size", [(576, 1024, 518), (375, 1242, 518), (200, 320, 154),
+                                                      (479, 641, 154), (37, 41, 518)])
+def test_preprocess_matches_original_transform_bitwise(height: int, width: int, input_size: int) -> None:
+    import cv2
+    import torch
+
+    from depth_anything_v2.dpt import DepthAnythingV2
+
+    raw = _frame(width, height, seed=height)
+    untouched, threads = raw.copy(), cv2.getNumThreads()
+    image, size = DepthAnythingV2.image2tensor(_on_device(), raw, input_size)
+    assert size == (height, width)
+    assert image.dtype == torch.float32 and image.is_contiguous() and image.device.type == TEST_DEVICE
+    assert torch.equal(image.cpu(), _reference_image2tensor(raw, input_size))
+    np.testing.assert_array_equal(raw, untouched)          # the caller's frame is not modified
+    assert cv2.getNumThreads() == threads                  # no OpenCV thread change
+
+
+def test_preprocess_float_input_matches_original_transform_bitwise() -> None:
+    import torch
+
+    from depth_anything_v2.dpt import DepthAnythingV2
+
+    raw = _frame(320, 200, seed=3).astype(np.float32)      # float BGR in 0-255: normalised in float64 as before
+    image, _ = DepthAnythingV2.image2tensor(_on_device(), raw, 154)
+    assert torch.equal(image.cpu(), _reference_image2tensor(raw, 154))
+
+
+def _tiny_vit(seed: int = 0):
+    import torch
+
+    from depth_anything_v2.dinov2 import DinoVisionTransformer
+
+    torch.manual_seed(seed)                                 # random pos_embed (init_weights)
+    return DinoVisionTransformer(img_size=518, patch_size=14, embed_dim=32, depth=1, num_heads=2,
+                                 block_chunks=0).eval()
+
+
+def _tokens(model, height: int, width: int, dtype=None, device: str = "cpu"):
+    import torch
+
+    return torch.zeros(1, 1 + (height // 14) * (width // 14), model.embed_dim,
+                       dtype=dtype or torch.float32, device=device)
+
+
+def _uncached(model, x, height: int, width: int):
+    from depth_anything_v2.dinov2 import DinoVisionTransformer
+
+    return DinoVisionTransformer._interpolate_pos_encoding(model, x, height, width)
+
+
+def _count_interpolations(model) -> list:
+    calls = []
+    real = model._interpolate_pos_encoding
+
+    def counted(x, w, h):
+        calls.append((w, h))
+        return real(x, w, h)
+
+    model._interpolate_pos_encoding = counted
+    return calls
+
+
+def test_pos_embed_cache_reuses_same_size_result() -> None:
+    import torch
+
+    model = _tiny_vit()
+    x = _tokens(model, 518, 924)
+    reference = _uncached(model, x, 518, 924)
+    calls = _count_interpolations(model)
+    with torch.no_grad():
+        first = model.interpolate_pos_encoding(x, 518, 924)
+        second = model.interpolate_pos_encoding(x, 518, 924)
+    assert len(calls) == 1 and len(model._pos_embed_cache) == 1
+    assert torch.equal(first, reference) and torch.equal(second, reference)
+    assert first.data_ptr() != second.data_ptr()           # every caller gets its own copy ...
+    first.add_(1.0)
+    with torch.no_grad():                                  # ... so modifying one cannot corrupt the cache
+        assert torch.equal(model.interpolate_pos_encoding(x, 518, 924), reference)
+    assert len(calls) == 1
+
+
+def test_pos_embed_cache_keeps_model_features_bitwise_identical() -> None:
+    import torch
+
+    model = _tiny_vit()
+    image = torch.rand(1, 3, 56, 84, generator=torch.Generator().manual_seed(0))
+    with torch.no_grad():
+        cold = model.get_intermediate_layers(image, 1)     # cache miss
+        warm = model.get_intermediate_layers(image, 1)     # cache hit
+    with torch.enable_grad():
+        uncached = model.get_intermediate_layers(image, 1)  # cache bypassed
+    for a, b, c in zip(cold, warm, uncached):
+        assert torch.equal(a, b) and torch.equal(a, c.detach())
+
+
+def test_pos_embed_cache_misses_on_other_input_size_and_is_bounded() -> None:
+    import torch
+
+    model = _tiny_vit()
+    calls = _count_interpolations(model)
+    sizes = [(518, 924), (518, 1722), (518, 924), (154, 280), (518, 1722)]
+    with torch.no_grad():
+        for h, w in sizes:
+            x = _tokens(model, h, w)
+            assert torch.equal(model.interpolate_pos_encoding(x, h, w), _uncached(model, x, h, w))
+    assert calls == [(518, 924), (518, 1722), (154, 280)]
+    with torch.no_grad():
+        for h, w in [(168, 280), (182, 280), (196, 280), (210, 280), (224, 280)]:
+            model.interpolate_pos_encoding(_tokens(model, h, w), h, w)
+    assert len(model._pos_embed_cache) == model._pos_embed_cache.max_entries
+
+
+def test_pos_embed_cache_invalidated_by_weight_changes() -> None:
+    import torch
+
+    model, other = _tiny_vit(0), _tiny_vit(1)
+    x = _tokens(model, 518, 924)
+    calls = _count_interpolations(model)
+    with torch.no_grad():
+        before = model.interpolate_pos_encoding(x, 518, 924)
+    model.load_state_dict(other.state_dict())             # in place: same storage, new values
+    with torch.no_grad():
+        after = model.interpolate_pos_encoding(x, 518, 924)
+    assert len(calls) == 2 and not torch.equal(after, before)
+    assert torch.equal(after, _uncached(other, x, 518, 924))
+    with torch.no_grad():
+        model.pos_embed.mul_(2.0)                         # any other in-place parameter update
+        scaled = model.interpolate_pos_encoding(x, 518, 924)
+    assert len(calls) == 3 and torch.equal(scaled, _uncached(model, x, 518, 924))
+    model.pos_embed.data = model.pos_embed.data * 3.0     # storage swap
+    with torch.no_grad():
+        swapped = model.interpolate_pos_encoding(x, 518, 924)
+    assert len(calls) == 4 and torch.equal(swapped, _uncached(model, x, 518, 924))
+
+
+def test_pos_embed_cache_invalidated_by_dtype_change() -> None:
+    import torch
+
+    model = _tiny_vit()
+    calls = _count_interpolations(model)
+    with torch.no_grad():
+        model.interpolate_pos_encoding(_tokens(model, 518, 924), 518, 924)
+        x64 = _tokens(model, 518, 924, dtype=torch.float64)             # input dtype only
+        out = model.interpolate_pos_encoding(x64, 518, 924)
+    assert len(calls) == 2 and out.dtype == torch.float64
+    model.double()                                                       # parameter dtype
+    with torch.no_grad():
+        out = model.interpolate_pos_encoding(x64, 518, 924)
+    assert len(calls) == 3 and torch.equal(out, _uncached(model, x64, 518, 924))
+
+
+@pytest.mark.skipif(not __import__("torch").cuda.is_available(), reason="CUDA not available")
+def test_pos_embed_cache_invalidated_by_device_change() -> None:
+    import torch
+
+    model = _tiny_vit()
+    calls = _count_interpolations(model)
+    with torch.no_grad():
+        model.interpolate_pos_encoding(_tokens(model, 518, 924), 518, 924)
+        model.to("cuda")
+        x = _tokens(model, 518, 924, device="cuda")
+        on_gpu = model.interpolate_pos_encoding(x, 518, 924)
+        assert on_gpu.device.type == "cuda" and torch.equal(on_gpu, _uncached(model, x, 518, 924))
+        model.to("cpu")
+        back = model.interpolate_pos_encoding(_tokens(model, 518, 924), 518, 924)
+    assert len(calls) == 3 and back.device.type == "cpu"
+
+
+def test_pos_embed_cache_bypassed_for_training_autograd_and_autocast() -> None:
+    import torch
+
+    model = _tiny_vit()
+    x = _tokens(model, 518, 924)
+    calls = _count_interpolations(model)
+    with torch.enable_grad():
+        a = model.interpolate_pos_encoding(x, 518, 924)
+        model.interpolate_pos_encoding(x, 518, 924)
+    assert len(calls) == 2 and len(model._pos_embed_cache) == 0
+    assert a.requires_grad
+    a.sum().backward()                                   # gradients still reach pos_embed
+    assert model.pos_embed.grad is not None and model.pos_embed.grad.abs().sum() > 0
+    model.train()
+    with torch.no_grad():
+        model.interpolate_pos_encoding(x, 518, 924)
+        model.interpolate_pos_encoding(x, 518, 924)
+    model.eval()
+    with torch.inference_mode():
+        model.interpolate_pos_encoding(x, 518, 924)
+    with torch.no_grad(), torch.autocast("cpu", dtype=torch.bfloat16):
+        model.interpolate_pos_encoding(x, 518, 924)
+    assert len(calls) == 6 and len(model._pos_embed_cache) == 0
+    with torch.no_grad():
+        out = model.interpolate_pos_encoding(x, 518, 924)
+    assert len(model._pos_embed_cache) == 1 and not out.requires_grad
+
+
+def test_pos_embed_cache_is_per_model_instance() -> None:
+    import copy
+    import pickle
+
+    import torch
+
+    first, second = _tiny_vit(0), _tiny_vit(0)           # identical weights, separate instances
+    x = _tokens(first, 518, 924)
+    first_calls, second_calls = _count_interpolations(first), _count_interpolations(second)
+    with torch.no_grad():
+        first.interpolate_pos_encoding(x, 518, 924)
+        second.interpolate_pos_encoding(x, 518, 924)
+        second.interpolate_pos_encoding(x, 518, 924)
+    assert len(first_calls) == 1 and len(second_calls) == 1
+    assert first._pos_embed_cache is not second._pos_embed_cache
+    clone = copy.deepcopy(first)
+    assert len(clone._pos_embed_cache) == 0 and clone._pos_embed_cache is not first._pos_embed_cache
+    fresh = _tiny_vit(0)
+    with torch.no_grad():
+        fresh.interpolate_pos_encoding(x, 518, 924)
+    restored = pickle.loads(pickle.dumps(fresh))
+    assert len(restored._pos_embed_cache) == 0
+    with torch.no_grad():
+        assert torch.equal(restored.interpolate_pos_encoding(x, 518, 924), _uncached(fresh, x, 518, 924))
+
+
+def test_pos_embed_cache_concurrent_inference_on_one_model() -> None:
+    import threading
+
+    import torch
+
+    model = _tiny_vit()
+    sizes = [(518, 924), (518, 1722)]
+    references = {s: _uncached(model, _tokens(model, *s), *s) for s in sizes}
+    errors, barrier = [], threading.Barrier(8)
+
+    def worker(i: int) -> None:
+        barrier.wait()
+        with torch.no_grad():
+            for k in range(20):
+                h, w = sizes[(i + k) % 2]
+                if not torch.equal(model.interpolate_pos_encoding(_tokens(model, h, w), h, w), references[(h, w)]):
+                    errors.append((i, k))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == [] and len(model._pos_embed_cache) == 2
+
+
+@needs_relative
+def test_depth_model_output_identical_to_original_preprocessing_without_cache() -> None:
+    import torch
+    import torch.nn.functional as F
+
+    from models import DepthEstimator
+
+    est = DepthEstimator(weights_path=RELATIVE_WEIGHTS, input_size=154, device_preference=TEST_DEVICE, strict=True)
+    frame = _frame(320, 200, seed=7)
+    miss, hit = est.predict_raw(frame), est.predict_raw(frame)
+    model = est.model
+    with torch.enable_grad():                             # cache bypassed, original preprocessing
+        depth = model.forward(_reference_image2tensor(frame, 154).to(next(model.parameters()).device))
+        original = F.interpolate(depth[:, None], (200, 320), mode="bilinear", align_corners=True)[0, 0]
+    original = original.detach().cpu().numpy().astype(np.float32)
+    np.testing.assert_array_equal(miss, original)
+    np.testing.assert_array_equal(hit, original)
+    assert len(model.pretrained._pos_embed_cache) == 1
+
+
+def _bev_inputs():
+    from models import Detection
+
+    depth = np.random.default_rng(3).uniform(2.0, 50.0, size=(120, 200)).astype(np.float32)
+    detections = [Detection(box=[40, 30, 80, 90], class_id=2, class_name="car", confidence=0.9, track_id=1),
+                  Detection(box=[120, 40, 150, 100], class_id=0, class_name="person", confidence=0.8, track_id=2)]
+    return _frame(200, 120, seed=4), depth, detections
+
+
+def _mapper(**kwargs):
+    from mapping import BEVMapper
+
+    return BEVMapper(fx=150, fy=150, cx=100, cy=60, **kwargs)
+
+
+def _open3d():
+    import mapping
+
+    if not mapping._OPEN3D_AVAILABLE:
+        pytest.skip("Open3D not installed")
+    return mapping.o3d
+
+
+def test_point_cloud_not_built_by_default(monkeypatch) -> None:
+    mapper = _mapper()
+    monkeypatch.setattr(mapper, "to_open3d_point_cloud",
+                        lambda *a, **k: pytest.fail("Open3D point cloud built without a request"))
+    frame, depth, detections = _bev_inputs()
+    result = mapper.build_bev(frame, depth, detections)
+    assert result.point_cloud is None and len(result.objects) == 2
+    points, _ = mapper.build_point_cloud(frame, depth, stride=10)
+    expected = mapper.render_bev_image(points, mapper.project_objects_to_bev(detections, depth))
+    assert result.bev_image.tobytes() == expected.tobytes()
+
+
+def test_point_cloud_built_on_request_with_unchanged_bev_and_objects() -> None:
+    o3d = _open3d()
+    frame, depth, detections = _bev_inputs()
+    plain = _mapper().build_bev(frame, depth, detections)
+    points, colors = _mapper().build_point_cloud(frame, depth, stride=10)
+    for result in (_mapper().build_bev(frame, depth, detections, with_point_cloud=True),
+                   _mapper(with_point_cloud=True).build_bev(frame, depth, detections)):
+        assert isinstance(result.point_cloud, o3d.geometry.PointCloud)
+        np.testing.assert_array_equal(np.asarray(result.point_cloud.points), points.astype(np.float64))
+        np.testing.assert_array_equal(np.asarray(result.point_cloud.colors), colors.astype(np.float64))
+        assert result.bev_image.tobytes() == plain.bev_image.tobytes()
+        assert result.objects == plain.objects
+    assert _mapper(with_point_cloud=True).build_bev(frame, depth, detections, with_point_cloud=False).point_cloud is None
+
+
+def test_point_cloud_ply_export_on_request(tmp_path) -> None:
+    from mapping import BEVMapper
+
+    o3d = _open3d()
+    result = _mapper(with_point_cloud=True).build_bev(*_bev_inputs())
+    path = tmp_path / "cloud.ply"
+    assert BEVMapper.save_point_cloud(result.point_cloud, str(path)) and path.stat().st_size > 0
+    loaded = o3d.io.read_point_cloud(str(path))
+    np.testing.assert_allclose(np.asarray(loaded.points), np.asarray(result.point_cloud.points), rtol=0, atol=1e-6)
+    default = _mapper().build_bev(*_bev_inputs())
+    assert not BEVMapper.save_point_cloud(default.point_cloud, str(tmp_path / "none.ply"))
+    assert not (tmp_path / "none.ply").exists()
+
+
+def _count_open3d_builds(monkeypatch) -> list:
+    """Counts to_open3d_point_cloud calls on every BEVMapper, including ones reset() creates."""
+    from mapping import BEVMapper
+
+    built = []
+    real = BEVMapper.to_open3d_point_cloud
+    monkeypatch.setattr(BEVMapper, "to_open3d_point_cloud",
+                        lambda self, *a: (built.append(self), real(self, *a))[1])
+    return built
+
+
+def test_metric_pipeline_skips_point_cloud_by_default(metric_pipeline, monkeypatch) -> None:
+    metric_pipeline.reset()
+    built = _count_open3d_builds(monkeypatch)
+    assert metric_pipeline.with_point_cloud is False
+    for i in range(2):
+        out = metric_pipeline.process(_road_like_frame(3 + i), timestamp=i / 24.0)
+        assert out.bev is not None and out.bev.point_cloud is None
+    assert built == []
+    metric_pipeline.reset()
+
+
+def test_metric_pipeline_point_cloud_setting_survives_reset(metric_pipeline, monkeypatch) -> None:
+    import mapping
+
+    built = _count_open3d_builds(monkeypatch)
+    metric_pipeline.reset()
+    try:
+        metric_pipeline.with_point_cloud = True                 # applies to the current mapper at once ...
+        out = metric_pipeline.process(_road_like_frame(3), timestamp=0.0)
+        assert len(built) == 1 and (out.bev.point_cloud is not None) == mapping._OPEN3D_AVAILABLE
+        old_mapper = metric_pipeline.bev_mapper
+        metric_pipeline.reset()                                 # ... and is kept by reset()
+        assert metric_pipeline.bev_mapper is not old_mapper and metric_pipeline.bev_mapper.with_point_cloud
+        assert metric_pipeline.with_point_cloud is True
+        out = metric_pipeline.process(_road_like_frame(4), timestamp=0.0)
+        assert len(built) == 2 and built[-1] is metric_pipeline.bev_mapper
+        assert (out.bev.point_cloud is not None) == mapping._OPEN3D_AVAILABLE
+        metric_pipeline.with_point_cloud = False                # switching off also survives reset()
+        metric_pipeline.reset()
+        out = metric_pipeline.process(_road_like_frame(5), timestamp=0.0)
+        assert len(built) == 2 and out.bev.point_cloud is None
+    finally:
+        metric_pipeline.with_point_cloud = False
+        metric_pipeline.reset()
+
+
+def test_pipeline_point_cloud_option_at_construction(metric_pipeline, monkeypatch) -> None:
+    import mapping
+    from pipeline import PerceptionPipeline
+
+    built = _count_open3d_builds(monkeypatch)
+    pipeline = PerceptionPipeline(metric_pipeline.config, metric_pipeline.models, with_point_cloud=True)
+    assert pipeline.with_point_cloud and pipeline.bev_mapper.with_point_cloud
+    pipeline.reset()
+    out = pipeline.process(_road_like_frame(6), timestamp=0.0)
+    assert len(built) == 1 and (out.bev.point_cloud is not None) == mapping._OPEN3D_AVAILABLE
+    default = PerceptionPipeline(metric_pipeline.config, metric_pipeline.models)
+    assert default.with_point_cloud is False
+    assert default.process(_road_like_frame(6), timestamp=0.0).bev.point_cloud is None and len(built) == 1
+
+
+def test_relative_pipeline_never_builds_bev_or_point_cloud(relative_pipeline, monkeypatch) -> None:
+    relative_pipeline.reset()
+    monkeypatch.setattr(relative_pipeline.bev_mapper, "build_bev",
+                        lambda *a, **k: pytest.fail("BEV built in relative mode"))
+    out = relative_pipeline.process(_road_like_frame(3), timestamp=0.0)
+    assert out.bev is None and out.depth.depth_map is not None
+    relative_pipeline.reset()

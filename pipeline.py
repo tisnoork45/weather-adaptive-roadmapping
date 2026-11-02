@@ -188,12 +188,16 @@ class PerceptionPipeline:
     by `.reset()`.
     """
 
-    def __init__(self, config: ConfigDict, models: Optional[PerceptionModels] = None) -> None:
+    def __init__(self, config: ConfigDict, models: Optional[PerceptionModels] = None, *,
+                 with_point_cloud: bool = False) -> None:
         # config.yaml is validated when loaded; this re-checks in-memory
         # overrides (command-line flags, tests) before any model is loaded.
         ensure_valid(config, source="pipeline configuration")
         self.config = config
         self.depth_mode = config.depth_estimation.get("mode", "relative")
+        # Build the Open3D point cloud in metric BEV frames (BEVResult.point_cloud, for
+        # .ply export via BEVMapper.save_point_cloud). Off by default; see with_point_cloud.
+        self._with_point_cloud = bool(with_point_cloud)
 
         if models is None:
             models = PerceptionModels.load(config)
@@ -229,6 +233,19 @@ class PerceptionPipeline:
         stream cannot leak into the new one. Track IDs restart at 1."""
         self._reset_state()
 
+    @property
+    def with_point_cloud(self) -> bool:
+        """Whether metric BEV frames also carry an Open3D point cloud (``BEVResult.point_cloud``).
+
+        A pipeline setting, not temporal state: it applies to the current BEV mapper at once
+        and is kept by `.reset()`. Without it ``BEVResult.point_cloud`` is ``None``."""
+        return self._with_point_cloud
+
+    @with_point_cloud.setter
+    def with_point_cloud(self, enabled: bool) -> None:
+        self._with_point_cloud = bool(enabled)
+        self.bev_mapper.with_point_cloud = self._with_point_cloud
+
     def _reset_state(self) -> None:
         """(Re)create every component that carries state from one frame to the next."""
         config = self.config
@@ -258,6 +275,7 @@ class PerceptionPipeline:
             bev_range_m=config.mapping.bev_range_m, bev_width_m=config.mapping.bev_width_m,
             resolution_px_per_m=config.mapping.bev_resolution_px_per_m,
             reference_width=config.camera.width, reference_height=config.camera.height,
+            with_point_cloud=self._with_point_cloud,
         )
         self.velocity_estimator = RelativeVelocityEstimator(
             history_length=config.velocity.history_length,

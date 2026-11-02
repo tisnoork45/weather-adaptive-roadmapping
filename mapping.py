@@ -1,8 +1,9 @@
 """Bird's-Eye-View (BEV) mapping module.
 
 Uses the estimated monocular depth map plus pinhole camera intrinsics to
-back-project pixels into a 3D point cloud (built with Open3D, if available),
-then flattens that point cloud onto a 2D top-down grid image. Detected /
+back-project pixels into a 3D point cloud (a numpy array; an Open3D cloud for
+.ply export is built only on request, see BEVMapper.build_bev), then flattens
+that point cloud onto a 2D top-down grid image. Detected /
 tracked objects are projected onto the same BEV grid.
 """
 
@@ -45,6 +46,8 @@ class BEVObject:
 class BEVResult:
     bev_image: np.ndarray
     objects: List[BEVObject] = field(default_factory=list)
+    # Open3D PointCloud, only when requested (BEVMapper/build_bev with_point_cloud=True)
+    # and Open3D is available; None otherwise.
     point_cloud: Optional[object] = None
     inference_time_ms: float = 0.0
 
@@ -55,7 +58,8 @@ class BEVMapper:
     def __init__(self, fx: float, fy: float, cx: float, cy: float,
                  bev_range_m: float = 60.0, bev_width_m: float = 40.0,
                  resolution_px_per_m: float = 10.0,
-                 reference_width: Optional[int] = None, reference_height: Optional[int] = None) -> None:
+                 reference_width: Optional[int] = None, reference_height: Optional[int] = None,
+                 with_point_cloud: bool = False) -> None:
         # fx/fy/cx/cy are defined for a reference_width x reference_height
         # image (config.yaml's camera.width/height). Frames of another size
         # (road.mp4 is 1024x576 vs the configured 1280x720) get the
@@ -71,6 +75,10 @@ class BEVMapper:
         self.resolution = resolution_px_per_m
         self.bev_h = int(bev_range_m * resolution_px_per_m)
         self.bev_w = int(bev_width_m * resolution_px_per_m)
+        # Build the Open3D point cloud in build_bev() (for .ply export via
+        # save_point_cloud). Off by default: nothing in the pipeline reads it, and
+        # constructing it took ~5 ms per metric frame.
+        self.with_point_cloud = with_point_cloud
 
     def _use_frame_size(self, width: int, height: int) -> None:
         """Scale the reference intrinsics to a width x height image (no-op without a reference size)."""
@@ -210,10 +218,17 @@ class BEVMapper:
         self._active_size = None  # a later call without a camera re-applies the reference scaling
 
     def build_bev(self, frame: np.ndarray, depth_map: np.ndarray, detections: List[Detection],
-                  camera: Optional[CameraModel] = None, valid_mask: Optional[np.ndarray] = None) -> BEVResult:
+                  camera: Optional[CameraModel] = None, valid_mask: Optional[np.ndarray] = None,
+                  with_point_cloud: Optional[bool] = None) -> BEVResult:
         """``depth_map`` must be metric depth in metres. ``camera``, when given,
         supplies this frame's intrinsics; otherwise the reference intrinsics are
-        scaled to the depth-map size as before."""
+        scaled to the depth-map size as before.
+
+        The Open3D point cloud is built only on request: pass ``with_point_cloud=True``
+        (or construct the mapper with ``with_point_cloud=True``; ``None`` uses the
+        mapper's setting). Otherwise ``BEVResult.point_cloud`` is ``None``. It is also
+        ``None`` when Open3D is unavailable or no point is valid. The BEV image and the
+        objects are identical either way; only the Open3D object is skipped."""
         start = time.perf_counter()
         # All projections below work in depth-map pixel coordinates.
         h, w = depth_map.shape[:2]
@@ -224,7 +239,9 @@ class BEVMapper:
         else:
             self._use_frame_size(w, h)
         points, colors = self.build_point_cloud(frame, depth_map, stride=10, valid_mask=valid_mask)
-        pcd = self.to_open3d_point_cloud(points, colors)
+        if with_point_cloud is None:
+            with_point_cloud = self.with_point_cloud
+        pcd = self.to_open3d_point_cloud(points, colors) if with_point_cloud else None
         bev_objects = self.project_objects_to_bev(detections, depth_map, valid_mask=valid_mask)
 
         bev_image = self.render_bev_image(points, bev_objects)

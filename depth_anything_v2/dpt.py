@@ -1,12 +1,16 @@
 import cv2
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.transforms import Compose
 
 from .dinov2 import DINOv2
 from .util.blocks import FeatureFusionBlock, _make_scratch
-from .util.transform import Resize, NormalizeImage, PrepareForNet
+from .util.transform import Resize
+
+# ImageNet statistics used by image2tensor (formerly passed to util.transform.NormalizeImage).
+_NORMALIZE_MEAN = [0.485, 0.456, 0.406]
+_NORMALIZE_STD = [0.229, 0.224, 0.225]
 
 
 def _make_fusion_block(features, use_bn, size=None):
@@ -194,26 +198,32 @@ class DepthAnythingV2(nn.Module):
         return depth.cpu().numpy()
     
     def image2tensor(self, raw_image, input_size=518):        
-        transform = Compose([
-            Resize(
-                width=input_size,
-                height=input_size,
-                resize_target=False,
-                keep_aspect_ratio=True,
-                ensure_multiple_of=14,
-                resize_method='lower_bound',
-                image_interpolation_method=cv2.INTER_CUBIC,
-            ),
-            NormalizeImage(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            PrepareForNet(),
-        ])
+        resize = Resize(
+            width=input_size,
+            height=input_size,
+            resize_target=False,
+            keep_aspect_ratio=True,
+            ensure_multiple_of=14,
+            resize_method='lower_bound',
+            image_interpolation_method=cv2.INTER_CUBIC,
+        )
         
         h, w = raw_image.shape[:2]
         
         image = cv2.cvtColor(raw_image, cv2.COLOR_BGR2RGB) / 255.0
         
-        image = transform({'image': image})['image']
-        image = torch.from_numpy(image).unsqueeze(0)
+        image = resize({'image': image})['image']
+        # Equivalent to NormalizeImage + PrepareForNet, bit for bit: the same float64
+        # operations in the same order, but normalised in place and transposed + cast to
+        # float32 in one copy instead of through three extra full-size temporaries. `image` is a
+        # fresh array from cv2.resize, so writing into it cannot touch the caller's frame.
+        if image.dtype != np.float64:   # the list mean/std promote any other dtype to float64
+            image = image.astype(np.float64)
+        np.subtract(image, _NORMALIZE_MEAN, out=image)
+        np.divide(image, _NORMALIZE_STD, out=image)
+        chw = np.empty((image.shape[2], image.shape[0], image.shape[1]), dtype=np.float32)
+        np.copyto(chw, image.transpose(2, 0, 1), casting='same_kind')
+        image = torch.from_numpy(chw).unsqueeze(0)
         
         # Follow the model's own device rather than re-detecting one here, so a
         # model deliberately placed on CPU never receives a CUDA input tensor.
