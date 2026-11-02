@@ -1,0 +1,10 @@
+check,pair,count,manual_review
+same_filename,test-train,0,
+sha256_identical,test-train,0,
+shared_name_stem,test-train,3,"all shared stems are generic DAWN prefixes (dawn_foggy, dawn_haze, dawn_mist), not a shared source; no BDD100K video id is shared"
+near_duplicate_dhash_le4,test-train,14,candidates are low-texture fog/night/rain images; most pairs cross classes; 6 representative pairs inspected visually: all different scenes (false positives)
+same_filename,test-val,0,
+sha256_identical,test-val,0,
+shared_name_stem,test-val,3,"all shared stems are generic DAWN prefixes (dawn_foggy, dawn_haze, dawn_mist), not a shared source; no BDD100K video id is shared"
+near_duplicate_dhash_le4,test-val,1,candidates are low-texture fog/night/rain images; most pairs cross classes; 6 representative pairs inspected visually: all different scenes (false positives)
+unreadable_images,all,0,

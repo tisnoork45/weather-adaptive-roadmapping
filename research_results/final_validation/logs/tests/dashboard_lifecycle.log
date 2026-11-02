@@ -1,0 +1,82 @@
+========================= test session starts ==========================
+platform linux -- Python 3.10.12, pytest-8.1.1, pluggy-1.5.0 -- /usr/bin/python
+hypothesis profile 'default' -> database=DirectoryBasedExampleDatabase('/tmp/claude-0/-workspace-weather-adaptive-roadmapping/38a226b4-d2ac-4a06-80af-84bdc163140e/scratchpad/fv/tests/copy/.hypothesis/examples')
+rootdir: /tmp/claude-0/-workspace-weather-adaptive-roadmapping/38a226b4-d2ac-4a06-80af-84bdc163140e/scratchpad/fv/tests/copy
+plugins: anyio-4.14.2, dash-4.2.0, shard-0.1.2, flakefinder-1.1.0, xdist-3.6.1, xdoctest-1.0.2, hypothesis-5.35.1, rerunfailures-14.0
+collecting ... collected 66 items
+Running 66 items in this shard: tests_dashboard.py::test_object_table_track_ids_are_one_nullable_integer_column, tests_dashboard.py::test_module_status_shows_each_models_real_backend, tests_dashboard.py::test_relative_depth_is_never_presented_as_metric, tests_dashboard.py::test_metric_depth_labels_strictness_calibration_and_validation, tests_dashboard.py::test_module_weights_and_status_wording, tests_dashboard.py::test_playback_commands, tests_dashboard.py::test_default_video_path_finds_the_existing_road_mp4, tests_dashboard.py::test_app_pause_resume_stop_and_restart, tests_dashboard.py::test_app_video_file_plays_the_real_video_and_resumes_at_the_exact_frame, tests_dashboard.py::test_app_missing_video_shows_an_error_instead_of_synthetic_input, tests_dashboard.py::test_app_end_of_video_then_play_starts_again, tests_dashboard.py::test_app_recording_status_complete_and_failed, tests_dashboard.py::test_app_strict_metric_depth_is_labelled_as_such, tests_dashboard.py::test_app_command_line_overrides_are_parsed_only_for_app_py, tests_dashboard.py::test_app_depth_mode_override_shows_the_bev_map_without_changing_config, tests_dashboard.py::test_app_default_depth_caption_matches_the_colour_map, tests_dashboard.py::test_depth_panel_draws_near_dark_and_far_bright_in_both_depth_modes, tests_foundation.py::test_shipped_config_is_valid_without_warnings, tests_foundation.py::test_validation_never_modifies_the_config, tests_foundation.py::test_reserved_keys_are_documented_not_flagged, tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[device.preference-gpu-device.preference: must be one of ['auto', 'cuda', 'mps', 'cpu'], got 'gpu'], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[camera.intrinsics.fx-value1-camera.intrinsics.fx: required key is missing], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[camera.intrinsics.fx--5.0-camera.intrinsics.fx: must be > 0, got -5.0], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[camera.width-1280.5-camera.width: expected integer, got float 1280.5], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[pipeline.strict-yes-pipeline.strict: expected boolean (true/false), got str 'yes'], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[detection.confidence_threshold-1.5-detection.confidence_threshold: must be <= 1.0, got 1.5], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[detection.classes_of_interest-value6-detection.classes_of_interest[1]: expected integer], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[depth_estimation.mode-absolute-depth_estimation.mode: must be one of ['relative', 'metric']], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[depth_estimation.encoder-vitg-depth_estimation.encoder: must be one of ['vits', 'vitb', 'vitl']], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[depth_estimation.metric_sha256-abc-depth_estimation.metric_sha256: must be a 64-character], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[depth_estimation.ignore_bottom_rows_fraction-1.0-depth_estimation.ignore_bottom_rows_fraction: must be < 1.0], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[weather_classification.normalize_std-value11-weather_classification.normalize_std: must have exactly 3 entries, got 2], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[weather_classification.classes-value12-weather_classification.classes: must not contain], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[velocity.history_length-1-velocity.history_length: must be >= 2, got 1], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[velocity.ema_alpha-0.0-velocity.ema_alpha: must be > 0, got 0.0], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[risk.ttc_thresholds_s.WARNING-1.0-risk.ttc_thresholds_s.WARNING: must be > CRITICAL (1.5), got 1.0], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[risk.ttc_thresholds_s.CAUTION-3.0-risk.ttc_thresholds_s.CAUTION: must be > WARNING (3.0), got 3.0], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[risk.weather_multipliers.fog-value17-risk.weather_multipliers: no entry for weather class(es) ['fog']], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[fusion.weather_modifiers.night-value18-fusion.weather_modifiers: no entry for weather class(es) ['night']], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[fusion.weather_modifiers.rain.camera_depth--0.1-fusion.weather_modifiers.rain.camera_depth: must be >= 0, got -0.1], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[logging.level-LOUD-logging.level: must be one of], tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[tracking-value21-tracking: expected a mapping of keys, got list], tests_foundation.py::test_unknown_keys_and_unused_weather_entries_only_warn, tests_foundation.py::test_optional_keys_may_be_omitted, tests_foundation.py::test_load_config_raises_one_error_listing_every_problem, tests_foundation.py::test_load_config_logs_warnings, tests_foundation.py::test_missing_attribute_error_names_the_full_key_path, tests_foundation.py::test_pipeline_rejects_invalid_overrides_before_loading_models, tests_foundation.py::test_ensure_valid_returns_the_report, tests_foundation.py::test_importing_project_modules_creates_no_files_or_handlers, tests_foundation.py::test_unconfigured_scripts_still_print_info_to_stdout, tests_foundation.py::test_configure_logging_from_config_is_idempotent_and_writes_the_configured_file, tests_foundation.py::test_configure_logging_without_file, tests_foundation.py::test_disabled_weather_classification_reports_unknown_with_neutral_adjustments, tests_foundation.py::test_setup_py_lists_every_module_and_its_local_imports, tests_foundation.py::test_setup_py_installs_the_vendored_depth_anything_package, tests_foundation.py::test_recorder_writes_manifest_and_csvs_and_marks_completion, tests_foundation.py::test_relative_depth_recording_leaves_metric_columns_empty, tests_foundation.py::test_interrupted_recording_stays_marked_incomplete, tests_foundation.py::test_recording_failure_never_raises_and_disables_the_recorder, tests_foundation.py::test_recorder_start_failure_returns_none, tests_foundation.py::test_recorder_never_reuses_a_run_directory, tests_foundation.py::test_recorder_default_root_is_outputs_dir_runs, tests_foundation.py::test_recording_is_off_by_default, tests_foundation.py::test_lock_covers_every_requirement_and_never_pins_a_container_build, tests_foundation.py::test_check_env_script_runs_without_installing_anything
+
+tests_dashboard.py::test_object_table_track_ids_are_one_nullable_integer_column PASSED [  1%]
+tests_dashboard.py::test_module_status_shows_each_models_real_backend PASSED [  3%]
+tests_dashboard.py::test_relative_depth_is_never_presented_as_metric PASSED [  4%]
+tests_dashboard.py::test_metric_depth_labels_strictness_calibration_and_validation PASSED [  6%]
+tests_dashboard.py::test_module_weights_and_status_wording PASSED [  7%]
+tests_dashboard.py::test_playback_commands PASSED                [  9%]
+tests_dashboard.py::test_default_video_path_finds_the_existing_road_mp4 PASSED [ 10%]
+tests_dashboard.py::test_app_pause_resume_stop_and_restart PASSED [ 12%]
+tests_dashboard.py::test_app_video_file_plays_the_real_video_and_resumes_at_the_exact_frame PASSED [ 13%]
+tests_dashboard.py::test_app_missing_video_shows_an_error_instead_of_synthetic_input PASSED [ 15%]
+tests_dashboard.py::test_app_end_of_video_then_play_starts_again PASSED [ 16%]
+tests_dashboard.py::test_app_recording_status_complete_and_failed PASSED [ 18%]
+tests_dashboard.py::test_app_strict_metric_depth_is_labelled_as_such PASSED [ 19%]
+tests_dashboard.py::test_app_command_line_overrides_are_parsed_only_for_app_py PASSED [ 21%]
+tests_dashboard.py::test_app_depth_mode_override_shows_the_bev_map_without_changing_config PASSED [ 22%]
+tests_dashboard.py::test_app_default_depth_caption_matches_the_colour_map PASSED [ 24%]
+tests_dashboard.py::test_depth_panel_draws_near_dark_and_far_bright_in_both_depth_modes PASSED [ 25%]
+tests_foundation.py::test_shipped_config_is_valid_without_warnings PASSED [ 27%]
+tests_foundation.py::test_validation_never_modifies_the_config PASSED [ 28%]
+tests_foundation.py::test_reserved_keys_are_documented_not_flagged PASSED [ 30%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[device.preference-gpu-device.preference: must be one of ['auto', 'cuda', 'mps', 'cpu'], got 'gpu'] PASSED [ 31%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[camera.intrinsics.fx-value1-camera.intrinsics.fx: required key is missing] PASSED [ 33%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[camera.intrinsics.fx--5.0-camera.intrinsics.fx: must be > 0, got -5.0] PASSED [ 34%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[camera.width-1280.5-camera.width: expected integer, got float 1280.5] PASSED [ 36%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[pipeline.strict-yes-pipeline.strict: expected boolean (true/false), got str 'yes'] PASSED [ 37%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[detection.confidence_threshold-1.5-detection.confidence_threshold: must be <= 1.0, got 1.5] PASSED [ 39%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[detection.classes_of_interest-value6-detection.classes_of_interest[1]: expected integer] PASSED [ 40%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[depth_estimation.mode-absolute-depth_estimation.mode: must be one of ['relative', 'metric']] PASSED [ 42%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[depth_estimation.encoder-vitg-depth_estimation.encoder: must be one of ['vits', 'vitb', 'vitl']] PASSED [ 43%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[depth_estimation.metric_sha256-abc-depth_estimation.metric_sha256: must be a 64-character] PASSED [ 45%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[depth_estimation.ignore_bottom_rows_fraction-1.0-depth_estimation.ignore_bottom_rows_fraction: must be < 1.0] PASSED [ 46%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[weather_classification.normalize_std-value11-weather_classification.normalize_std: must have exactly 3 entries, got 2] PASSED [ 48%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[weather_classification.classes-value12-weather_classification.classes: must not contain] PASSED [ 50%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[velocity.history_length-1-velocity.history_length: must be >= 2, got 1] PASSED [ 51%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[velocity.ema_alpha-0.0-velocity.ema_alpha: must be > 0, got 0.0] PASSED [ 53%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[risk.ttc_thresholds_s.WARNING-1.0-risk.ttc_thresholds_s.WARNING: must be > CRITICAL (1.5), got 1.0] PASSED [ 54%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[risk.ttc_thresholds_s.CAUTION-3.0-risk.ttc_thresholds_s.CAUTION: must be > WARNING (3.0), got 3.0] PASSED [ 56%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[risk.weather_multipliers.fog-value17-risk.weather_multipliers: no entry for weather class(es) ['fog']] PASSED [ 57%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[fusion.weather_modifiers.night-value18-fusion.weather_modifiers: no entry for weather class(es) ['night']] PASSED [ 59%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[fusion.weather_modifiers.rain.camera_depth--0.1-fusion.weather_modifiers.rain.camera_depth: must be >= 0, got -0.1] PASSED [ 60%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[logging.level-LOUD-logging.level: must be one of] PASSED [ 62%]
+tests_foundation.py::test_each_kind_of_invalid_value_is_reported_with_its_key_path[tracking-value21-tracking: expected a mapping of keys, got list] PASSED [ 63%]
+tests_foundation.py::test_unknown_keys_and_unused_weather_entries_only_warn PASSED [ 65%]
+tests_foundation.py::test_optional_keys_may_be_omitted PASSED    [ 66%]
+tests_foundation.py::test_load_config_raises_one_error_listing_every_problem PASSED [ 68%]
+tests_foundation.py::test_load_config_logs_warnings PASSED       [ 69%]
+tests_foundation.py::test_missing_attribute_error_names_the_full_key_path PASSED [ 71%]
+tests_foundation.py::test_pipeline_rejects_invalid_overrides_before_loading_models PASSED [ 72%]
+tests_foundation.py::test_ensure_valid_returns_the_report PASSED [ 74%]
+tests_foundation.py::test_importing_project_modules_creates_no_files_or_handlers PASSED [ 75%]
+tests_foundation.py::test_unconfigured_scripts_still_print_info_to_stdout PASSED [ 77%]
+tests_foundation.py::test_configure_logging_from_config_is_idempotent_and_writes_the_configured_file PASSED [ 78%]
+tests_foundation.py::test_configure_logging_without_file PASSED  [ 80%]
+tests_foundation.py::test_disabled_weather_classification_reports_unknown_with_neutral_adjustments PASSED [ 81%]
+tests_foundation.py::test_setup_py_lists_every_module_and_its_local_imports PASSED [ 83%]
+tests_foundation.py::test_setup_py_installs_the_vendored_depth_anything_package PASSED [ 84%]
+tests_foundation.py::test_recorder_writes_manifest_and_csvs_and_marks_completion PASSED [ 86%]
+tests_foundation.py::test_relative_depth_recording_leaves_metric_columns_empty PASSED [ 87%]
+tests_foundation.py::test_interrupted_recording_stays_marked_incomplete PASSED [ 89%]
+tests_foundation.py::test_recording_failure_never_raises_and_disables_the_recorder PASSED [ 90%]
+tests_foundation.py::test_recorder_start_failure_returns_none PASSED [ 92%]
+tests_foundation.py::test_recorder_never_reuses_a_run_directory PASSED [ 93%]
+tests_foundation.py::test_recorder_default_root_is_outputs_dir_runs PASSED [ 95%]
+tests_foundation.py::test_recording_is_off_by_default PASSED     [ 96%]
+tests_foundation.py::test_lock_covers_every_requirement_and_never_pins_a_container_build PASSED [ 98%]
+tests_foundation.py::test_check_env_script_runs_without_installing_anything PASSED [100%]
+
+=========================== warnings summary ===========================
+../../../../../../../../usr/local/lib/python3.10/dist-packages/torch/_custom_ops.py:253
+  /usr/local/lib/python3.10/dist-packages/torch/_custom_ops.py:253: DeprecationWarning: torch.library.impl_abstract was renamed to torch.library.register_fake. Please use that instead; we will remove torch.library.impl_abstract in a future version of PyTorch.
+    return torch.library.impl_abstract(qualname, func, _stacklevel=2)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+==================== 66 passed, 1 warning in 36.25s ====================

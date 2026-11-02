@@ -370,3 +370,57 @@ def test_app_strict_metric_depth_is_labelled_as_such(workdir) -> None:
     assert "Object Detection" in html and "BIRD'S-EYE VIEW" not in html  # the BEV map itself is shown
     assert len(at.get("image")) == 3
     assert "depth mode metric (strict)" in _texts(at.caption)
+
+
+def _image_captions(at) -> str:
+    return "\n".join(img.caption for element in at.get("image") for img in element.proto.imgs)
+
+
+def test_app_command_line_overrides_are_parsed_only_for_app_py() -> None:
+    app = _load_app_module()
+    assert app.cli_overrides(["app.py", "--depth-mode", "metric"]) == {"depth_estimation.mode": "metric"}
+    assert app.cli_overrides(["/x/app.py", "--depth-mode", "relative", "--strict"]) == {
+        "depth_estimation.mode": "relative", "pipeline.strict": True}
+    assert app.cli_overrides(["app.py"]) == {}
+    assert app.cli_overrides(["pytest", "--strict", "-k", "x"]) == {}   # another program's arguments
+    with pytest.raises(SystemExit):
+        app.cli_overrides(["app.py", "--depth-mode", "feet"])
+
+
+def test_app_depth_mode_override_shows_the_bev_map_without_changing_config(workdir, monkeypatch) -> None:
+    if not ROAD.is_file():
+        pytest.skip("road.mp4 not found")
+    config_before = (workdir / "config.yaml").read_bytes()
+    monkeypatch.setattr(sys, "argv", [str(ROOT / "app.py"), "--depth-mode", "metric"])
+    at = _ok(_session().run())
+    _ok(at.radio(key="source_kind").set_value("Video file").run())
+    p = at.session_state["pipeline"]
+    assert p.depth_mode == "metric" and not p.pipeline_cfg.strict
+    html = _texts(at.markdown)
+    assert "METRIC (NON-STRICT)" in html and "BIRD'S-EYE VIEW" not in html  # the BEV map itself is shown
+    assert len(at.get("image")) == 3
+    assert "command-line overrides depth_estimation.mode=metric" in _texts(at.caption)
+    assert "Metric depth estimate (near = dark, far = bright)" in _image_captions(at)
+    assert (workdir / "config.yaml").read_bytes() == config_before
+
+
+def test_app_default_depth_caption_matches_the_colour_map(workdir) -> None:
+    if not ROAD.is_file():
+        pytest.skip("road.mp4 not found")
+    at = _ok(_session().run())
+    _ok(at.radio(key="source_kind").set_value("Video file").run())
+    assert at.session_state["pipeline"].depth_mode == "relative"
+    assert "Relative depth: near/far order only, no metric scale (near = dark, far = bright)" in _image_captions(at)
+
+
+def test_depth_panel_draws_near_dark_and_far_bright_in_both_depth_modes() -> None:
+    from models import DEPTH_KIND_METRIC
+    from pipeline import PipelineOutput, render_depth_panel
+
+    metric = np.tile(np.linspace(80.0, 2.0, 50, dtype=np.float32)[:, None], (1, 8))   # top far, bottom near
+    for depth in (DepthResult(depth_map=metric, kind=DEPTH_KIND_METRIC),
+                  DepthResult(depth_map=1.0 / metric, kind=DEPTH_KIND_RELATIVE)):   # inverse depth
+        out = PipelineOutput(frame=np.zeros((50, 8, 3), np.uint8), weather=None, detections=None, depth=depth,
+                             fusion=None, bev=None)
+        panel = render_depth_panel(out).astype(int).sum(axis=2)
+        assert panel[-1].mean() < panel[0].mean()            # near (bottom) darker than far (top)

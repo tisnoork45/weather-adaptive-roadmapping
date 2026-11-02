@@ -16,10 +16,14 @@ changes. A live camera cannot be resumed: every run opens it afresh.
 
 Run with:
     streamlit run app.py
+    streamlit run app.py -- --depth-mode metric [--strict]   # metric depth: BEV, distance, TTC, risk
+The flags after "--" override config.yaml for this server only, exactly like run.py's.
 """
 
 from __future__ import annotations
 
+import argparse
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -69,12 +73,43 @@ def load_shared_models(model_key: str, _config) -> PerceptionModels:
     return PerceptionModels.load(_config).thread_safe()
 
 
+def cli_overrides(argv: Optional[list] = None) -> dict:
+    """Command-line overrides given after "--" (``streamlit run app.py -- --depth-mode metric``),
+    as {config key: value}. Only read when this script is what was launched (Streamlit sets
+    sys.argv[0] to it), so a test runner's own arguments are never taken for ours."""
+    argv = sys.argv if argv is None else argv
+    if not argv or Path(argv[0]).name != Path(__file__).name:
+        return {}
+    parser = argparse.ArgumentParser(prog="streamlit run app.py --", allow_abbrev=False, add_help=False)
+    parser.add_argument("--depth-mode", choices=["relative", "metric"], default=None)
+    parser.add_argument("--strict", action="store_true")
+    args = parser.parse_args(argv[1:])
+    overrides = {}
+    if args.depth_mode is not None:
+        overrides["depth_estimation.mode"] = args.depth_mode
+    if args.strict:
+        overrides["pipeline.strict"] = True
+    return overrides
+
+
+def apply_overrides(config, overrides: dict) -> None:
+    """In memory only, as run.py does; config.yaml is not modified. The pipeline validates
+    the resulting configuration again."""
+    if "depth_estimation.mode" in overrides:
+        config.depth_estimation["mode"] = overrides["depth_estimation.mode"]
+    if "pipeline.strict" in overrides:
+        config.pipeline["strict"] = overrides["pipeline.strict"]
+
+
 def session_pipeline() -> PerceptionPipeline:
     """This browser session's own pipeline: its own tracks, velocity histories,
     smoothing and metrics, on top of the shared models. Kept in st.session_state,
     so other sessions never see or change it."""
     if "pipeline" not in st.session_state:
         config = load_config("config.yaml")
+        overrides = cli_overrides()
+        apply_overrides(config, overrides)
+        st.session_state["cli_overrides"] = overrides
         configure_logging_from_config(config)
         models = load_shared_models(model_config_key(config), config)
         st.session_state["pipeline"] = PerceptionPipeline(config, models=models)
@@ -291,15 +326,17 @@ def render_output(ph: Placeholders, output: PipelineOutput, pipeline: Perception
     else:
         ph.bev.markdown(render_unavailable_card_html(
             "BIRD'S-EYE VIEW", f"Not available: {reason}. The BEV map needs metric depth "
-                               "(depth_estimation.mode: metric in config.yaml)."), unsafe_allow_html=True)
+                               "(start the dashboard with streamlit run app.py -- --depth-mode metric, "
+                               "or set depth_estimation.mode: metric in config.yaml)."), unsafe_allow_html=True)
 
     ph.weather.markdown(render_weather_card_html(output), unsafe_allow_html=True)
     if output.model_status.get("depth") == "disabled":
         ph.depth.markdown(render_unavailable_card_html("DEPTH MAP", "Depth estimation is disabled in config.yaml."),
                           unsafe_allow_html=True)
     else:
-        caption = ("Metric depth estimate (near = warm, far = cool)" if output.depth.is_metric
-                   else "Relative depth: near/far order only, no metric scale")
+        # render_depth_panel orients every depth kind as larger = farther (MAGMA: dark = low).
+        caption = ("Metric depth estimate (near = dark, far = bright)" if output.depth.is_metric
+                   else "Relative depth: near/far order only, no metric scale (near = dark, far = bright)")
         ph.depth.image(cv2.cvtColor(render_depth_panel(output), cv2.COLOR_BGR2RGB), channels="RGB",
                        width="stretch", caption=caption)
     ph.depth_info.markdown(render_depth_calibration_html(output, cfg.pipeline), unsafe_allow_html=True)
@@ -404,7 +441,11 @@ def _run_dashboard(pipeline: PerceptionPipeline) -> None:
         def _on(flag: bool) -> str:
             return "on" if flag else "off"
 
-        st.caption(f"From config.yaml (read-only): depth mode {depth_mode}; depth estimation "
+        overrides = ss.get("cli_overrides", {})
+        source_note = ("config.yaml with command-line overrides "
+                       + ", ".join(f"{k}={v}" for k, v in overrides.items())
+                       if overrides else "config.yaml")
+        st.caption(f"From {source_note} (read-only): depth mode {depth_mode}; depth estimation "
                    f"{_on(pipe.run_depth_estimation)}, weather classification "
                    f"{_on(pipe.run_weather_classification)}, tracking {_on(pipe.run_tracking)}, "
                    f"BEV mapping {_on(pipe.run_bev_mapping)}. What actually runs each frame is shown "
@@ -503,8 +544,11 @@ def _run_dashboard(pipeline: PerceptionPipeline) -> None:
     if record_run and ss.get("recorder") is None:
         source_desc = {SOURCE_SYNTHETIC: "synthetic demo stream", SOURCE_VIDEO: video_path}.get(
             source_kind, cfg.camera.source)
+        overrides = ss.get("cli_overrides", {})
         recorder = RunRecorder.start(cfg, pipeline, source=source_desc, fps=source.fps,
-                                     command=["streamlit", "run", "app.py"])
+                                     command=["streamlit", "run", "app.py"]
+                                     + (["--"] + sys.argv[1:] if overrides else []),
+                                     cli_overrides=overrides)
         if recorder is None:
             message_placeholder.warning("Recording could not start (see the log); processing continues "
                                         "without recording.")

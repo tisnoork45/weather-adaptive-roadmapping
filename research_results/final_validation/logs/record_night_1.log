@@ -1,0 +1,37 @@
+2026-11-02 14:34:31 | INFO     | run | Building perception pipeline...
+2026-11-02 14:34:31 | INFO     | pipeline | Initializing perception pipeline modules (depth mode: metric, strict: False)...
+2026-11-02 14:34:32 | INFO     | models | Loaded YOLO11x model from weights/yolo11x.pt on device cuda
+2026-11-02 14:34:33 | INFO     | models | Loaded Depth Anything V2 (vits, metric mode) from weights/depth_anything_v2_metric_vkitti_vits.pth
+2026-11-02 14:34:33 | INFO     | models | Loaded trained weather classifier from weights/efficientnet_weather.pth (reported val_acc=0.8137, classes=['clear', 'rain', 'fog', 'snow', 'night', 'overcast'])
+2026-11-02 14:34:33 | INFO     | pipeline | All perception pipeline modules initialized successfully.
+2026-11-02 14:34:33 | INFO     | run | Prerecorded video source; using video-timeline timestamps at 25.000 fps.
+2026-11-02 14:34:34 | INFO     | run_logging | Recording run to /workspace/weather-adaptive-roadmapping/research_results/final_validation/runs/20261102-143433_93f98ef-dirty
+2026-11-02 14:34:36 | INFO     | run | Frame 30 | FPS=18.5 | Weather=night | Objects=16 | Depth=metric_m | Latency=52.3ms
+2026-11-02 14:34:37 | INFO     | run | Frame 60 | FPS=18.7 | Weather=night | Objects=14 | Depth=metric_m | Latency=51.0ms
+2026-11-02 14:34:39 | INFO     | run | Frame 90 | FPS=18.8 | Weather=night | Objects=12 | Depth=metric_m | Latency=47.3ms
+2026-11-02 14:34:41 | INFO     | run | Frame 120 | FPS=18.7 | Weather=night | Objects=8 | Depth=metric_m | Latency=46.8ms
+2026-11-02 14:34:42 | INFO     | run | Frame 150 | FPS=18.9 | Weather=night | Objects=8 | Depth=metric_m | Latency=46.7ms
+2026-11-02 14:34:44 | INFO     | run | Frame 180 | FPS=19.1 | Weather=night | Objects=8 | Depth=metric_m | Latency=46.6ms
+2026-11-02 14:34:45 | INFO     | run | Frame 210 | FPS=19.2 | Weather=night | Objects=6 | Depth=metric_m | Latency=46.4ms
+2026-11-02 14:34:47 | INFO     | run | Frame 240 | FPS=19.4 | Weather=night | Objects=4 | Depth=metric_m | Latency=46.5ms
+2026-11-02 14:34:48 | INFO     | run | Frame 270 | FPS=19.3 | Weather=night | Objects=8 | Depth=metric_m | Latency=47.1ms
+2026-11-02 14:34:50 | INFO     | run | Frame 300 | FPS=19.1 | Weather=night | Objects=7 | Depth=metric_m | Latency=47.0ms
+2026-11-02 14:34:52 | INFO     | run | Frame 330 | FPS=19.3 | Weather=night | Objects=4 | Depth=metric_m | Latency=46.2ms
+2026-11-02 14:34:53 | INFO     | run | Frame 360 | FPS=19.5 | Weather=night | Objects=3 | Depth=metric_m | Latency=46.6ms
+2026-11-02 14:34:55 | INFO     | run | Frame 390 | FPS=19.4 | Weather=night | Objects=6 | Depth=metric_m | Latency=46.7ms
+2026-11-02 14:34:56 | INFO     | run | Frame 420 | FPS=19.5 | Weather=night | Objects=6 | Depth=metric_m | Latency=46.4ms
+2026-11-02 14:34:58 | INFO     | run | Frame 450 | FPS=19.4 | Weather=night | Objects=7 | Depth=metric_m | Latency=46.2ms
+2026-11-02 14:34:59 | INFO     | run | Frame 480 | FPS=19.3 | Weather=night | Objects=6 | Depth=metric_m | Latency=51.5ms
+2026-11-02 14:35:01 | INFO     | run | Frame 510 | FPS=19.2 | Weather=night | Objects=6 | Depth=metric_m | Latency=49.3ms
+2026-11-02 14:35:02 | INFO     | run | Frame 540 | FPS=18.9 | Weather=night | Objects=6 | Depth=metric_m | Latency=47.2ms
+2026-11-02 14:35:04 | INFO     | run | Frame 570 | FPS=19.1 | Weather=night | Objects=9 | Depth=metric_m | Latency=46.8ms
+2026-11-02 14:35:06 | INFO     | run | Frame 600 | FPS=19.1 | Weather=night | Objects=6 | Depth=metric_m | Latency=46.8ms
+2026-11-02 14:35:07 | INFO     | run | Frame 630 | FPS=19.0 | Weather=night | Objects=5 | Depth=metric_m | Latency=49.8ms
+2026-11-02 14:35:09 | INFO     | run | Frame 660 | FPS=19.1 | Weather=night | Objects=9 | Depth=metric_m | Latency=46.7ms
+2026-11-02 14:35:10 | INFO     | run | Frame 690 | FPS=19.2 | Weather=fog | Objects=10 | Depth=metric_m | Latency=47.5ms
+2026-11-02 14:35:12 | INFO     | run | Frame 720 | FPS=19.2 | Weather=night | Objects=14 | Depth=metric_m | Latency=47.0ms
+2026-11-02 14:35:13 | INFO     | run | Frame 750 | FPS=19.0 | Weather=night | Objects=15 | Depth=metric_m | Latency=46.9ms
+2026-11-02 14:35:15 | INFO     | run | Frame 780 | FPS=18.9 | Weather=night | Objects=17 | Depth=metric_m | Latency=47.6ms
+2026-11-02 14:35:17 | INFO     | run | Frame 810 | FPS=19.0 | Weather=night | Objects=13 | Depth=metric_m | Latency=47.3ms
+2026-11-02 14:35:18 | INFO     | run | End of stream.
+2026-11-02 14:35:18 | INFO     | run_logging | Run recording complete: 837 frames, 7255 objects in /workspace/weather-adaptive-roadmapping/research_results/final_validation/runs/20261102-143433_93f98ef-dirty

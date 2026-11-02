@@ -1,0 +1,10 @@
+video,kind,path,meta_frames,fps,width,height,fourcc,decoded_frames,blank_frames,size_bytes,frames_match_source,resolution_matches_source,fps_matches_source,strip_median_abs_diff,strip_share_within_12
+ROAD,source,road.mp4,7249,23.9970,1024,576,h264,7249,0,34080921,,,,,
+ROAD,overlay_depth,output/final_capstone_demo/CAPSTONE_FINAL_ROAD_DEMO.mp4,7249,23.9970,1024,576,FMP4,7249,0,228904003,True,True,True,44.0000,0.0551
+ROAD,no_tint,output/final_capstone_demo_no_tint/CAPSTONE_FINAL_ROAD_DEMO.mp4,7249,23.9970,1024,576,FMP4,7249,0,287719921,True,True,True,2.0000,0.9986
+NIGHT_1,source,data/sample_videos/night_1.mp4,837,25.0000,1024,576,h264,837,0,7014864,,,,,
+NIGHT_1,overlay_depth,output/final_capstone_demo/CAPSTONE_FINAL_NIGHT_1_DEMO.mp4,837,25.0000,1024,576,FMP4,837,0,26787509,True,True,True,25.0000,0.3973
+NIGHT_1,no_tint,output/final_capstone_demo_no_tint/CAPSTONE_FINAL_NIGHT_1_DEMO.mp4,837,25.0000,1024,576,FMP4,837,0,31890467,True,True,True,2.0000,1.0000
+NIGHT_2,source,data/sample_videos/night_2.mp4,1328,25.0000,1024,576,h264,1328,0,9106266,,,,,
+NIGHT_2,overlay_depth,output/final_capstone_demo/CAPSTONE_FINAL_NIGHT_2_DEMO.mp4,1328,25.0000,1024,576,FMP4,1328,0,38381512,True,True,True,22.0000,0.2913
+NIGHT_2,no_tint,output/final_capstone_demo_no_tint/CAPSTONE_FINAL_NIGHT_2_DEMO.mp4,1328,25.0000,1024,576,FMP4,1328,0,40780040,True,True,True,2.0000,1.0000

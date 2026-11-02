@@ -1,0 +1,4 @@
+interval,seconds,frames,fps,timestamp_resolution_s
+pipeline build -> end of stream,501.000,7249.000,14.469,1.000
+pipeline ready -> end of stream,498.000,7249.000,14.556,1.000
+"last HUD FPS reading (Frame 7230, 60-frame window)",,,14.600,

@@ -1,0 +1,4 @@
+run_dir,video,status,frames,objects,depth_kinds
+20261102-142813_93f98ef-dirty,road,complete,7249,27534,metric_m
+20261102-143433_93f98ef-dirty,night_1,complete,837,7255,metric_m
+20261102-143524_93f98ef-dirty,night_2,complete,1328,5620,metric_m

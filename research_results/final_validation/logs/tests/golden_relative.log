@@ -1,0 +1,6 @@
+2026-11-02 14:37:31 | INFO     | pipeline | Initializing perception pipeline modules (depth mode: relative, strict: False)...
+2026-11-02 14:37:32 | INFO     | models | Loaded YOLO11x model from weights/yolo11x.pt on device cuda
+2026-11-02 14:37:34 | INFO     | models | Loaded Depth Anything V2 (vits, relative mode) from weights/depth_anything_v2_vits.pth
+2026-11-02 14:37:34 | INFO     | models | Loaded trained weather classifier from weights/efficientnet_weather.pth (reported val_acc=0.8137, classes=['clear', 'rain', 'fog', 'snow', 'night', 'overcast'])
+2026-11-02 14:37:34 | INFO     | pipeline | All perception pipeline modules initialized successfully.
+road.mp4 relative: 240/240 frames, 0 differences

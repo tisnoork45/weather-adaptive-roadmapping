@@ -1,0 +1,8 @@
+method,abs_rel,rmse,rmse_log,delta1,frames
+ground_plane,0.1699,7.0508,0.1997,0.8254,994
+legacy_ema,2.5614,33.3520,1.2777,0.0170,1000
+legacy_per_frame,2.5019,32.9871,1.2358,0.0217,1000
+metric,0.1321,5.2605,0.2104,0.8060,1000
+metric_focal,0.1340,5.3018,0.2128,0.8031,1000
+oracle_aligned_gt,0.0811,3.6306,0.1230,0.9395,1000
+oracle_aligned_lidar,0.0865,3.8317,0.1284,0.9303,1000

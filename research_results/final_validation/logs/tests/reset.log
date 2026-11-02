@@ -1,0 +1,12 @@
+2026-11-02 14:38:20 | INFO     | pipeline | Initializing perception pipeline modules (depth mode: metric, strict: True)...
+2026-11-02 14:38:21 | INFO     | models | Loaded YOLO11x model from weights/yolo11x.pt on device cuda
+2026-11-02 14:38:23 | INFO     | models | Loaded Depth Anything V2 (vits, metric mode) from weights/depth_anything_v2_metric_vkitti_vits.pth
+2026-11-02 14:38:23 | INFO     | models | Loaded trained weather classifier from weights/efficientnet_weather.pth (reported val_acc=0.8137, classes=['clear', 'rain', 'fog', 'snow', 'night', 'overcast'])
+2026-11-02 14:38:23 | INFO     | pipeline | All perception pipeline modules initialized successfully.
+2026-11-02 14:38:29 | INFO     | pipeline | Initializing perception pipeline with shared models (depth mode: metric, strict: True)...
+2026-11-02 14:38:29 | INFO     | pipeline | All perception pipeline modules initialized successfully.
+2026-11-02 14:38:29 | INFO     | pipeline | Initializing perception pipeline with shared models (depth mode: metric, strict: True)...
+2026-11-02 14:38:29 | INFO     | pipeline | All perception pipeline modules initialized successfully.
+road.mp4 metric, 60 frames, after reset(): 0 differences
+road.mp4 metric, 60 frames, thread A (shared models): 0 differences
+road.mp4 metric, 60 frames, thread B (shared models): 0 differences

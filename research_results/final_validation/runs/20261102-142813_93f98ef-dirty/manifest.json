@@ -1,0 +1,335 @@
+{
+  "manifest_version": 1,
+  "run_id": "20261102-142813_93f98ef-dirty",
+  "status": "complete",
+  "started_utc": "2026-11-02T14:28:13+00:00",
+  "finished_utc": "2026-11-02T14:34:27+00:00",
+  "frames_recorded": 7249,
+  "objects_recorded": 27534,
+  "command": [
+    "research_results/final_validation/scripts/record_production_outputs.py",
+    "--source",
+    "road.mp4",
+    "--depth-mode",
+    "metric",
+    "--record-run"
+  ],
+  "cwd": "/workspace/weather-adaptive-roadmapping",
+  "project": {
+    "name": "Weather Adaptive Road Mapping for Autonomous Vehicles",
+    "version": "1.0.0"
+  },
+  "git": {
+    "commit": "93f98efb7789346b3ccc6bb9c6ff8ba03937b6bc",
+    "branch": "research-improvements",
+    "dirty": true,
+    "changed_files": [
+      "M README.md",
+      " M app.py",
+      " M tests_dashboard.py",
+      "?? CAPSTONE_SUMMARY.md",
+      "?? research_results/"
+    ]
+  },
+  "config": {
+    "path": "config.yaml",
+    "file_sha256": "ecd7b59f539bf45e9cdf1ea603becebf15b12b363f68bae837b317f6c445313a",
+    "cli_overrides_in_memory": {
+      "depth_estimation.mode": "metric"
+    },
+    "resolved_sha256": "3d821b4c2a548c56f6695b1961488bc7c4bc5abc4b825b17c419ce6b28fc8d94",
+    "resolved": {
+      "project": {
+        "name": "Weather Adaptive Road Mapping for Autonomous Vehicles",
+        "version": "1.0.0"
+      },
+      "paths": {
+        "weights_dir": "weights",
+        "data_dir": "data",
+        "logs_dir": "logs",
+        "outputs_dir": "outputs"
+      },
+      "device": {
+        "preference": "auto"
+      },
+      "camera": {
+        "source": 0,
+        "width": 1280,
+        "height": 720,
+        "fps": 30,
+        "calibrated": false,
+        "intrinsics": {
+          "fx": 1000.0,
+          "fy": 1000.0,
+          "cx": 640.0,
+          "cy": 360.0
+        },
+        "mount_height_m": 1.55,
+        "pitch_deg": 2.0,
+        "extrinsics": {
+          "translation": {
+            "x": 1.5,
+            "y": 0.0,
+            "z": 1.55
+          },
+          "rotation": {
+            "roll": 0.0,
+            "pitch": 2.0,
+            "yaw": 0.0
+          }
+        }
+      },
+      "logging": {
+        "level": "INFO",
+        "log_to_file": true,
+        "log_file": "logs/pipeline.log",
+        "max_bytes": 5242880,
+        "backup_count": 3
+      },
+      "pipeline": {
+        "run_depth_estimation": true,
+        "run_weather_classification": true,
+        "run_tracking": true,
+        "run_bev_mapping": true,
+        "strict": false,
+        "target_fps": 15
+      },
+      "dashboard": {
+        "title": "Weather Adaptive Road Mapping Dashboard",
+        "refresh_interval_sec": 0.03
+      },
+      "detection": {
+        "weights_path": "weights/yolo11x.pt",
+        "download_url": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11x.pt",
+        "confidence_threshold": 0.35,
+        "iou_threshold": 0.45,
+        "input_size": 640,
+        "classes_of_interest": [
+          0,
+          1,
+          2,
+          3,
+          5,
+          7,
+          9,
+          11
+        ]
+      },
+      "depth_estimation": {
+        "mode": "metric",
+        "weights_path": "weights/depth_anything_v2_vits.pth",
+        "download_url": "https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_vits.pth",
+        "metric_weights_path": "weights/depth_anything_v2_metric_vkitti_vits.pth",
+        "metric_download_url": "https://huggingface.co/depth-anything/Depth-Anything-V2-Metric-VKITTI-Small/resolve/c725b8589bdf6ab04072cab74c0467830db80d6d/depth_anything_v2_metric_vkitti_vits.pth",
+        "metric_sha256": "9203e538d35255c90dda4b7fedb47ff33fe725497bcca3b1e53b3a65ee63f0cb",
+        "encoder": "vits",
+        "input_size": 518,
+        "max_depth_m": 80.0,
+        "ignore_bottom_rows_fraction": 0.0
+      },
+      "weather_classification": {
+        "weights_path": "weights/efficientnet_weather.pth",
+        "input_size": 224,
+        "classes": [
+          "clear",
+          "rain",
+          "fog",
+          "snow",
+          "night",
+          "overcast"
+        ],
+        "temporal_smoothing_s": 1.0,
+        "normalize_mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "normalize_std": [
+          0.229,
+          0.224,
+          0.225
+        ]
+      },
+      "tracking": {
+        "track_thresh": 0.5,
+        "track_buffer": 30,
+        "match_thresh": 0.8,
+        "frame_rate": 30,
+        "min_box_area": 10
+      },
+      "mapping": {
+        "bev_range_m": 60.0,
+        "bev_width_m": 40.0,
+        "bev_resolution_px_per_m": 10
+      },
+      "fusion": {
+        "base_weights": {
+          "camera_detection": 0.9,
+          "camera_depth": 0.8
+        },
+        "weather_modifiers": {
+          "clear": {
+            "camera_detection": 1.0,
+            "camera_depth": 1.0
+          },
+          "overcast": {
+            "camera_detection": 0.95,
+            "camera_depth": 0.95
+          },
+          "rain": {
+            "camera_detection": 0.75,
+            "camera_depth": 0.6
+          },
+          "fog": {
+            "camera_detection": 0.55,
+            "camera_depth": 0.45
+          },
+          "snow": {
+            "camera_detection": 0.6,
+            "camera_depth": 0.55
+          },
+          "night": {
+            "camera_detection": 0.7,
+            "camera_depth": 0.65
+          }
+        },
+        "ema_alpha": 0.25
+      },
+      "confidence_estimation": {
+        "detection_signal_weights": {
+          "model_score": 0.5,
+          "weather_penalty": 0.3,
+          "box_stability": 0.2
+        },
+        "depth_signal_weights": {
+          "model_score": 0.4,
+          "weather_penalty": 0.4,
+          "edge_consistency": 0.2
+        },
+        "history_length": 30
+      },
+      "velocity": {
+        "history_length": 5,
+        "max_gap_seconds": 2.0,
+        "ema_alpha": 0.5
+      },
+      "risk": {
+        "min_safe_distance_m": 5.0,
+        "ttc_thresholds_s": {
+          "CRITICAL": 1.5,
+          "WARNING": 3.0,
+          "CAUTION": 5.0
+        },
+        "weather_multipliers": {
+          "clear": 1.0,
+          "overcast": 1.05,
+          "rain": 1.3,
+          "fog": 1.6,
+          "snow": 1.5,
+          "night": 1.25
+        }
+      },
+      "datasets": {
+        "kitti_depth_selection_root": "/workspace/datasets/kitti/depth_selection/extracted/depth_selection"
+      }
+    }
+  },
+  "checkpoints": {
+    "detection": {
+      "path": "weights/yolo11x.pt",
+      "exists": true,
+      "resolved": "/workspace/weather-adaptive-roadmapping/weights/yolo11x.pt",
+      "size_bytes": 114636239,
+      "sha256": "7bc158aa95c0ebfdd87f70f01653c1131b93e92522dbe15c228bcd742e773a24"
+    },
+    "depth": {
+      "path": "weights/depth_anything_v2_metric_vkitti_vits.pth",
+      "exists": true,
+      "resolved": "/workspace/checkpoints/depth_anything_v2_metric_vkitti/depth_anything_v2_metric_vkitti_vits.pth",
+      "size_bytes": 99221808,
+      "sha256": "9203e538d35255c90dda4b7fedb47ff33fe725497bcca3b1e53b3a65ee63f0cb"
+    },
+    "weather": {
+      "path": "weights/efficientnet_weather.pth",
+      "exists": true,
+      "resolved": "/workspace/weather-adaptive-roadmapping/weights/efficientnet_weather.pth",
+      "size_bytes": 16341066,
+      "sha256": "0bda562ef450866777bcc512c4c0fc3aa3a6736c5f10d7626c6ad382fe260c28"
+    }
+  },
+  "models": {
+    "detection": {
+      "backend": "neural network",
+      "device": "cuda"
+    },
+    "depth": {
+      "backend": "neural network",
+      "device": "cuda"
+    },
+    "weather": {
+      "backend": "neural network",
+      "device": "cuda"
+    }
+  },
+  "device": {
+    "preference": "auto",
+    "gpu": "NVIDIA H100 80GB HBM3 MIG 3g.40gb"
+  },
+  "versions": {
+    "python": "3.10.12",
+    "torch": "2.4.0a0+f70bd71a48.nv24.6",
+    "torchvision": "0.19.0a0",
+    "numpy": "1.26.4",
+    "opencv-python": "4.10.0.84",
+    "ultralytics": "8.4.192",
+    "streamlit": "1.60.0",
+    "PyYAML": "6.0.1",
+    "scipy": "1.13.1",
+    "pandas": "2.2.1",
+    "open3d": "0.20.0",
+    "Pillow": "10.3.0"
+  },
+  "platform": "Linux-5.15.0-1053-nvidia-x86_64-with-glibc2.35",
+  "pipeline": {
+    "depth_mode": "metric",
+    "strict": false,
+    "run_weather_classification": true,
+    "run_tracking": true,
+    "run_depth_estimation": true,
+    "run_bev_mapping": true
+  },
+  "camera": {
+    "calibrated": false,
+    "config_intrinsics": {
+      "fx": 1000.0,
+      "fy": 1000.0,
+      "cx": 640.0,
+      "cy": 360.0
+    },
+    "config_size": [
+      1280,
+      720
+    ],
+    "first_frame": {
+      "fx": 800.0,
+      "fy": 800.0,
+      "cx": 512.0,
+      "cy": 288.0,
+      "width": 1024,
+      "height": 576,
+      "calibrated": false,
+      "source": "config.yaml camera"
+    }
+  },
+  "source": {
+    "description": "road.mp4",
+    "fps": 23.996954449152543,
+    "timestamps": "video timeline (frame_index / fps)"
+  },
+  "outputs_note": "Monocular-camera estimates only (no LiDAR, radar or IMU; forward-facing camera only). Distances, velocities and TTC come from metric monocular depth with UNCALIBRATED placeholder intrinsics: approximate only.",
+  "files": {
+    "frames": "frames.csv",
+    "objects": "objects.csv"
+  },
+  "error": null
+}

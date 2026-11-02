@@ -1,0 +1,3 @@
+estimator,label,n_valid,mae_m_s,mae_ci_low,mae_ci_high,rmse_m_s,median_ae_m_s,sign_accuracy,paired_rel_change_vs_B0,paired_n
+B0,Baseline B0,8513,3.872171,3.186830,4.475655,9.543420,1.346161,0.910896,0.000000,8513
+KS_kalman_scale,Experimental KS,8506,1.143058,0.929166,1.387528,2.023149,0.639116,0.993156,-0.696950,8467

@@ -1,0 +1,17 @@
+========================= test session starts ==========================
+platform linux -- Python 3.10.12, pytest-8.1.1, pluggy-1.5.0 -- /usr/bin/python
+hypothesis profile 'default' -> database=DirectoryBasedExampleDatabase('/tmp/claude-0/-workspace-weather-adaptive-roadmapping/38a226b4-d2ac-4a06-80af-84bdc163140e/scratchpad/fv/tests/copy/.hypothesis/examples')
+rootdir: /tmp/claude-0/-workspace-weather-adaptive-roadmapping/38a226b4-d2ac-4a06-80af-84bdc163140e/scratchpad/fv/tests/copy
+plugins: anyio-4.14.2, dash-4.2.0, shard-0.1.2, flakefinder-1.1.0, xdist-3.6.1, xdoctest-1.0.2, hypothesis-5.35.1, rerunfailures-14.0
+collecting ... collected 50 items / 49 deselected / 1 selected
+Running 1 items in this shard: tests_kitti_tracking.py::test_G6_b0_replay_reproduces_cached_production_output
+
+tests_kitti_tracking.py::test_G6_b0_replay_reproduces_cached_production_output PASSED [100%]
+
+=========================== warnings summary ===========================
+../../../../../../../../usr/local/lib/python3.10/dist-packages/torch/_custom_ops.py:253
+  /usr/local/lib/python3.10/dist-packages/torch/_custom_ops.py:253: DeprecationWarning: torch.library.impl_abstract was renamed to torch.library.register_fake. Please use that instead; we will remove torch.library.impl_abstract in a future version of PyTorch.
+    return torch.library.impl_abstract(qualname, func, _stacklevel=2)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+============= 1 passed, 49 deselected, 1 warning in 3.62s ==============

@@ -1,0 +1,9 @@
+video,weather_label,SAFE,CAUTION,WARNING,CRITICAL
+night_1,fog,19,5,5,17
+night_1,night,141,44,165,441
+night_2,fog,53,4,9,77
+night_2,night,403,47,118,597
+night_2,rain,3,0,1,16
+road,clear,2396,570,1040,2119
+road,overcast,129,44,119,260
+road,rain,298,22,54,198

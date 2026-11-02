@@ -1,0 +1,7 @@
+true\predicted,clear,rain,fog,snow,night,overcast
+clear,115,2,0,9,3,21
+rain,2,107,0,7,17,17
+fog,0,4,41,1,1,1
+snow,7,2,0,127,6,8
+night,0,13,0,3,132,2
+overcast,7,3,1,2,2,135

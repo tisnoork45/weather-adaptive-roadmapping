@@ -1,0 +1,13 @@
+depth_mode,code,run,n_frames_total,n_frames_steady,source_file,frame_wall_mean_ms,frame_wall_p95_ms,frame_wall_fps,process_mean_ms,process_p95_ms,process_fps,depth_kind
+relative,before,r1,7249,7239,/workspace/experiments/performance_profiling/20261102-111418_T6.5_review/benchmark/r1/baseline_relative_before_frames.csv,71.1077,77.1181,14.0632,62.9868,68.0502,15.8764,relative_inverse
+relative,before,r2,7249,7239,/workspace/experiments/performance_profiling/20261102-111418_T6.5_review/benchmark/r2_r3/baseline_relative_before_r2_frames.csv,69.2454,77.2089,14.4414,61.4482,67.8781,16.2739,relative_inverse
+relative,before,r3,7249,7239,/workspace/experiments/performance_profiling/20261102-111418_T6.5_review/benchmark/r2_r3/baseline_relative_before_r3_frames.csv,72.4536,100.9025,13.8019,64.1843,83.0739,15.5801,relative_inverse
+relative,after,r1,7249,7239,/workspace/experiments/performance_profiling/20261102-111418_T6.5_review/benchmark/r1/baseline_relative_after_frames.csv,58.3582,63.6506,17.1356,50.4654,54.8003,19.8156,relative_inverse
+relative,after,r2,7249,7239,/workspace/experiments/performance_profiling/20261102-111418_T6.5_review/benchmark/r2_r3/baseline_relative_after_r2_frames.csv,57.7537,63.2729,17.3149,49.9487,54.2997,20.0206,relative_inverse
+relative,after,r3,7249,7239,/workspace/experiments/performance_profiling/20261102-111418_T6.5_review/benchmark/r2_r3/baseline_relative_after_r3_frames.csv,57.8950,64.6617,17.2727,49.9734,55.6956,20.0106,relative_inverse
+metric,before,r1,7249,7239,/workspace/experiments/performance_profiling/20261102-111418_T6.5_review/benchmark/r1/baseline_metric_before_frames.csv,73.3315,80.5455,13.6367,65.3809,71.5119,15.2950,metric_m
+metric,before,r2,7249,7239,/workspace/experiments/performance_profiling/20261102-111418_T6.5_review/benchmark/r2_r3/baseline_metric_before_r2_frames.csv,73.5429,81.8994,13.5975,65.6928,72.8990,15.2224,metric_m
+metric,before,r3,7249,7239,/workspace/experiments/performance_profiling/20261102-111418_T6.5_review/benchmark/r2_r3/baseline_metric_before_r3_frames.csv,77.9233,91.4261,12.8331,69.6832,80.4422,14.3507,metric_m
+metric,after,r1,7249,7239,/workspace/experiments/performance_profiling/20261102-111418_T6.5_review/benchmark/r1/baseline_metric_after_frames.csv,56.8960,62.9829,17.5759,49.1258,54.0462,20.3559,metric_m
+metric,after,r2,7249,7239,/workspace/experiments/performance_profiling/20261102-111418_T6.5_review/benchmark/r2_r3/baseline_metric_after_r2_frames.csv,55.7681,61.0869,17.9314,47.9607,52.1467,20.8504,metric_m
+metric,after,r3,7249,7239,/workspace/experiments/performance_profiling/20261102-111418_T6.5_review/benchmark/r2_r3/baseline_metric_after_r3_frames.csv,60.6739,67.4877,16.4816,52.3914,57.9651,19.0871,metric_m

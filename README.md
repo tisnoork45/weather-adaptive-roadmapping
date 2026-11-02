@@ -452,8 +452,10 @@ The original `train_weather_model()` trained against whatever index order `torch
 
 **Streamlit dashboard (recommended):**
 ```bash
-streamlit run app.py
+streamlit run app.py                              # default: relative depth
+streamlit run app.py -- --depth-mode metric       # metric depth: adds BEV, distance, speed, TTC and risk
 ```
+The flags after `--` (`--depth-mode relative|metric`, `--strict`) override `config.yaml` for that server only, exactly like `run.py`'s. The dashboard sidebar and recorded runs show them. Demonstration walkthrough and findings: [CAPSTONE_SUMMARY.md](CAPSTONE_SUMMARY.md).
 
 **Headless / OpenCV window:**
 ```bash
@@ -585,7 +587,7 @@ By default the tests run on CPU with synthetic frames. Set `TEST_DEVICE=cuda` to
 | `tests_kitti_tracking.py`, `tests_velocity_experimental.py`, `tests_ego_motion.py` | Task 5 evaluation code |
 | `tests_foundation.py` | <ul><li>Configuration validation.</li><li>No import-time logging side effects.</li><li>The run recorder, including failure and interruption handling.</li><li>`run_weather_classification`.</li><li>`setup.py` module coverage and the environment lock.</li></ul> |
 | `tests_regression.py` | <ul><li>Exact golden comparison of `road.mp4` outputs (relative and metric).</li><li>KITTI 0000, frames 0–49, against the frozen Task 5 cache.</li><li>Determinism after `PerceptionPipeline.reset()`, and with models shared across threads.</li><li>Independent pipelines and trackers.</li><li>Model backend status.</li><li>`run.py --synthetic`.</li><li>Two Streamlit sessions.</li></ul> See `scripts/regression/README.md`. |
-| `tests_dashboard.py` | <ul><li>Backend labels (model, heuristic fallback, disabled).</li><li>Relative vs metric depth, strictness and calibration wording.</li><li>Module weights and status wording.</li><li>The objects table's Track ID column.</li><li>The Streamlit app: default video path, missing video, pause/resume/stop/restart, end of video, recording status, strict metric depth.</li></ul> |
+| `tests_dashboard.py` | <ul><li>Backend labels (model, heuristic fallback, disabled).</li><li>Relative vs metric depth, strictness and calibration wording.</li><li>Module weights and status wording.</li><li>The objects table's Track ID column.</li><li>The Streamlit app: default video path, missing video, pause/resume/stop/restart, end of video, recording status, strict metric depth, the `-- --depth-mode` override, and depth-map colour captions.</li></ul> |
 
 Tests that need the KITTI data skip when it is absent. One test also needs `KITTI_VELOCITY_CACHE` set to a Task 5 cache directory. The golden checks skip, with the reason, when `road.mp4`, the goldens in `outputs/regression/` or a GPU are missing, or when the environment fingerprint differs from the one the goldens were recorded in.
 

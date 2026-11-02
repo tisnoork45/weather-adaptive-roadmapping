@@ -1,0 +1,5 @@
+depth_mode,code,frame_wall_mean_ms,frame_wall_p95_ms,frame_wall_fps,process_mean_ms,process_p95_ms,process_fps,frame_wall_mean_ms_min,frame_wall_p95_ms_min,frame_wall_fps_min,process_mean_ms_min,process_p95_ms_min,process_fps_min,frame_wall_mean_ms_max,frame_wall_p95_ms_max,frame_wall_fps_max,process_mean_ms_max,process_p95_ms_max,process_fps_max
+metric,after,57.7793,63.8525,17.3296,49.8260,54.7193,20.0978,55.7681,61.0869,16.4816,47.9607,52.1467,19.0871,60.6739,67.4877,17.9314,52.3914,57.9651,20.8504
+metric,before,74.9325,84.6237,13.3558,66.9189,74.9510,14.9560,73.3315,80.5455,12.8331,65.3809,71.5119,14.3507,77.9233,91.4261,13.6367,69.6832,80.4422,15.2950
+relative,after,58.0023,63.8618,17.2410,50.1292,54.9319,19.9489,57.7537,63.2729,17.1356,49.9487,54.2997,19.8156,58.3582,64.6617,17.3149,50.4654,55.6956,20.0206
+relative,before,70.9356,85.0765,14.1022,62.8731,73.0007,15.9101,69.2454,77.1181,13.8019,61.4482,67.8781,15.5801,72.4536,100.9025,14.4414,64.1843,83.0739,16.2739
